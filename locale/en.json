@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Codex",
+    "description": "Run the local Codex through App Server as a DSH model provider, with its full harness."
+  }
+}

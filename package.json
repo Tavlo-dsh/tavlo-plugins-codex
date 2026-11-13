@@ -1,0 +1,83 @@
+{
+  "name": "tavlo-plugins-codex",
+  "version": "0.1.0",
+  "description": "在 DeepSeek Harness 里通过 Codex App Server 运行本机 Codex（完整 Codex harness）",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "assets/icon.svg",
+    "docs/design.md",
+    "docs/implementation-plan.md",
+    "docs/progress.md",
+    "docs/compatibility.md",
+    "README.md"
+  ],
+  "icon": "./assets/icon.svg",
+  "keywords": [
+    "dsh-plugin",
+    "codex",
+    "codex-app-server",
+    "tavlo"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:local": "pnpm build && node scripts/smoke.mjs",
+    "prepack": "pnpm build"
+  },
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.2-rc.1 <0.3.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.1.0",
+    "@deepseek-ai/dsh-agent": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-attachment": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-commands": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-session": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-session-projection": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-session-title": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-subprocess": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/dsh-user-approval": ">=0.2.2-rc.1 <0.3.0",
+    "@deepseek-ai/schemastery": "^3.19.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.1.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-attachment": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-commands": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-projection": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-session-title": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-subprocess": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-user-approval": "0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "3.19.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0",
+    "zod": "^4.4.3"
+  }
+}

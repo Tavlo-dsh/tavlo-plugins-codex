@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Codex",
+    "description": "通过 Codex App Server 运行本机 Codex，作为 DSH 的模型提供方使用，保留完整的 Codex harness。"
+  }
+}

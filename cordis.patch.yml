@@ -1,0 +1,5 @@
+# Adds the `codex` model provider to DSH. Every field is optional; see README.
+- insert:
+    - id: tavlo-codex
+      name: tavlo-plugins-codex
+      config: {}
