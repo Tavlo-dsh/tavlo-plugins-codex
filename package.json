@@ -1,8 +1,15 @@
 {
-  "name": "tavlo-plugins-codex",
+  "name": "dsh-plugin-codex-app-server",
   "version": "0.1.0",
   "description": "在 DeepSeek Harness 里通过 Codex App Server 运行本机 Codex（完整 Codex harness）",
   "license": "MIT",
+  "author": "Tavlo-dsh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tavlo-dsh/tavlo-plugins-codex.git"
+  },
+  "homepage": "https://github.com/Tavlo-dsh/tavlo-plugins-codex#readme",
+  "bugs": "https://github.com/Tavlo-dsh/tavlo-plugins-codex/issues",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -59,8 +66,10 @@
     "@deepseek-ai/dsh-subprocess": ">=0.2.2-rc.1 <0.3.0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1 <0.3.0",
     "@deepseek-ai/dsh-user-approval": ">=0.2.2-rc.1 <0.3.0",
-    "@deepseek-ai/schemastery": "^3.19.0",
-    "zod": "^4.0.0"
+    "@deepseek-ai/schemastery": "^3.19.0"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.1.0",

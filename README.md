@@ -1,4 +1,4 @@
-# tavlo-plugins-codex
+# dsh-plugin-codex-app-server
 
 DeepSeek Harness（DSH）插件：通过本机 **`codex app-server`** 把 Codex 注册为模型提供方 `codex`。每个 DSH 会话拥有一个常驻进程和一个原生 Codex thread，使用标准输入／输出上的双向 JSON-RPC 通信。
 
@@ -17,13 +17,19 @@ npm install -g @openai/codex
 codex login
 ```
 
-已有可用的 Codex 配置或登录态时，可直接使用。从当前项目源码安装插件：
+已有可用的 Codex 配置或登录态时，可直接使用。使用 npm 包安装：
 
 ```bash
-cd F:/github/tavlo-dsh-plugins/tavlo-plugins-codex
+dsh plugin --profile web add dsh-plugin-codex-app-server
+```
+
+从源码安装：
+
+```bash
+cd /path/to/tavlo-plugins-codex
 pnpm install
 pnpm build
-dsh plugin --profile web add F:/github/tavlo-dsh-plugins/tavlo-plugins-codex
+dsh plugin --profile web add "$(pwd)"
 ```
 
 插件启动时会短暂启动本机 App Server 查询 `model/list`，不创建 Codex thread；如果模型目录先来查询且还没有缓存，provider 会等待这次发现完成再返回列表。完成后菜单刷新并缓存模型及推理强度到 DSH home 的 `tavlo-codex/models.json`。查询完成前仍可选择 **Codex / Default**，它使用本机 Codex 配置的模型。若查询失败，检查 DSH 日志和 Codex CLI 登录状态，然后重启 DSH 重试。
@@ -76,7 +82,7 @@ dsh plugin --profile web add F:/github/tavlo-dsh-plugins/tavlo-plugins-codex
 
 ```yaml
 - id: tavlo-codex
-  name: tavlo-plugins-codex
+  name: dsh-plugin-codex-app-server
   config:
     executable: ''
     inheritCredentials: true
