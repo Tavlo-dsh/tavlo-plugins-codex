@@ -23,6 +23,12 @@ codex login
 dsh plugin --profile web add dsh-plugin-codex-app-server
 ```
 
+更新到本次修复版本：
+
+```bash
+dsh plugin --profile web add dsh-plugin-codex-app-server@0.1.1
+```
+
 从源码安装：
 
 ```bash
@@ -30,6 +36,23 @@ cd /path/to/tavlo-plugins-codex
 pnpm install
 pnpm build
 dsh plugin --profile web add "$(pwd)"
+```
+
+Windows 本地安装或更新可使用打包文件：
+
+```powershell
+Set-Location F:\github\tavlo-dsh-plugins\tavlo-plugins-codex
+pnpm install
+pnpm pack --pack-destination ..\.refs\verification
+dsh plugin --profile web add "F:\github\tavlo-dsh-plugins\.refs\verification\dsh-plugin-codex-app-server-0.1.1.tgz"
+```
+
+`pack` 会通过 `prepack` 自动构建。`web` 应替换成实际使用的 profile；安装后重启该 DSH profile，让会话启动新的 Codex App Server 进程。
+
+已通过 `link:` 引用本地源码目录的 profile，执行 `pnpm build` 后重启 DSH 即可更新。已有依赖别名 `tavlo-plugins-codex` 的 profile 改装打包文件时，保留原别名和 bundle 配置：
+
+```powershell
+dsh plugin --profile web add "tavlo-plugins-codex@file:F:/github/tavlo-dsh-plugins/.refs/verification/dsh-plugin-codex-app-server-0.1.1.tgz"
 ```
 
 插件启动时会短暂启动本机 App Server 查询 `model/list`，不创建 Codex thread；如果模型目录先来查询且还没有缓存，provider 会等待这次发现完成再返回列表。完成后菜单刷新并缓存模型及推理强度到 DSH home 的 `tavlo-codex/models.json`。查询完成前仍可选择 **Codex / Default**，它使用本机 Codex 配置的模型。若查询失败，检查 DSH 日志和 Codex CLI 登录状态，然后重启 DSH 重试。
@@ -85,6 +108,7 @@ dsh plugin --profile web add "$(pwd)"
   name: dsh-plugin-codex-app-server
   config:
     executable: ''
+    clientName: codex_dsh
     inheritCredentials: true
     env: {}
     requestTimeoutMs: 60000
@@ -99,12 +123,17 @@ dsh plugin --profile web add "$(pwd)"
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `executable` | `''` | Codex 可执行文件或 JS 入口的路径；为空则自动查找。显式路径不存在或无法解析时直接报错。 |
+| `clientName` | `codex_dsh` | Codex App Server 的集成名称，会影响上游 `originator` 与 `User-Agent`。供应商要求特定的集成名称时，使用其认可的值；不能保证供应商自动认可这个默认名称。修改后重启 DSH。 |
 | `inheritCredentials` | `true` | 传入 DSH 的完整环境变量；设为 false 时使用 DSH 过滤后的环境。此设置不会隔离磁盘上的 Codex 登录态。 |
 | `env` | `{}` | 追加或覆盖 Codex 环境变量，可设置 `CODEX_HOME` 来选择另一份原生配置和登录态。 |
 | `requestTimeoutMs` | `60000` | 单次 JSON-RPC 请求等待应答的上限，不是模型整个回合的执行时限。 |
 | `cancelGraceMs` | `10000` | 中断后等待 `turn/completed` 的时长。 |
 | `disposeGraceMs` | `3000` | DSH 终止子进程时的信号升级间隔。 |
 | `auxiliary` | 上例 | 标题、摘要等辅助模型请求的路由。 |
+
+`0.1.1` 将此前写死的 `tavlo_dsh` 改为可配置的 `codex_dsh`，并统一会话与模型发现的初始化。插件运行的仍是本机 Codex；`Tavlo DSH` 显示名称保留。遇到 `unauthorized client detected` 时，诊断会提示核对供应商的客户端识别规则，而非要求重新登录。本地实际请求头已验证，用户已确认本次修复完成；其他供应商的客户端白名单仍按其接入要求配置。
+
+供应商要求额外请求头时，在实际使用的 `CODEX_HOME/config.toml` 的 `[model_providers.<id>]` 中配置 `http_headers` 或 `env_http_headers`。具体名称和值以供应商文档为准；DSH 中其他模型适配器的请求头不会自动注入此插件启动的原生 Codex。
 
 辅助请求转交给其他普通模型提供方，避免进入用户真实的 Codex thread。先尝试 `auxiliary.routes` 中的 `{ provider, model }`，然后自动发现，记住首个成功路由。自动发现会跳过 `codex` 和 `claude-code`，防止两个原生会话插件互相转发。失败路由 60 秒内跳过；已经输出任何分片后不会换路重放。
 
@@ -145,5 +174,11 @@ pnpm pack
 `test:local` 使用临时的独立 `CODEX_HOME` 验证真实 CLI 的初始化、模型列表、线程、Plan 设置、名称、暂停 Goal、预算修改和清除；不发送模型回合，不使用现有登录态。单元与集成测试使用可控的 App Server 消息验证会话、统计、审批、恢复／分叉、取消、进程失败、图片、原生控制和 DSH 辅助路由。
 
 真实已登录文字验收使用独立 `DSH_HOME` 和工作目录，未修改用户默认 DSH profile。它验证装载、权限映射、回复、日志中的原生状态与进程退出；其他真实交互仍在 [开发计划](docs/implementation-plan.md) 中保留待验收状态。
+
+## npm 发布
+
+`.github/workflows/publish.yml` 先执行类型检查、测试和构建，再通过 npm Trusted Publishing（OIDC）发布，不使用长期 npm token。推送与 `package.json` 版本匹配的标签（如 `v0.1.1`）会触发发布；也可在 GitHub Actions 手动运行，勾选 `publish` 时必须从 `main` 发布，不勾选则仅验证。
+
+首次启用时，在 npm 包设置的 Trusted Publisher 中选择 GitHub Actions：组织 `Tavlo-dsh`，仓库 `tavlo-plugins-codex`，工作流文件 `publish.yml`，环境名称留空，并允许直接发布。也可使用 npm CLI 的 `npm trust github dsh-plugin-codex-app-server --repo Tavlo-dsh/tavlo-plugins-codex --file publish.yml --allow-publish` 完成绑定；npm 可能要求账户双重认证。
 
 设计细节见 [docs/design.md](docs/design.md)。

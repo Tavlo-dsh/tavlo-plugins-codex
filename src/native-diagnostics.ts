@@ -5,6 +5,7 @@ import { record, text } from './protocol.ts'
 type Entry = NativeState['diagnostics'][number]
 export function classifyFailure(code: unknown, message: string): Entry {
   const kind = typeof code === 'string' ? code : 'other', lower = `${kind} ${message}`.toLowerCase()
+  if (/unauthorized client|unsupported client|client not authorized/.test(lower)) return { id: 'client', kind, severity: 'error', message: '上游供应商拒绝当前客户端标识。请核对 clientName 及供应商对 originator / User-Agent 的接入要求。', details: message.slice(0, 2000) }
   if (/unauthorized|authentication|not logged in|login required/.test(lower)) return { id: 'auth', kind, severity: 'error', message: 'Codex 认证失败。请使用本机 Codex CLI 登录并重试。', details: message.slice(0, 2000) }
   if (/usage.?limit|rate.?limit|quota|credits|budget/.test(lower)) return { id: 'quota', kind, severity: 'error', message: 'Codex 额度或速率限制已触发；检查账户用量和恢复时间。', details: message.slice(0, 2000) }
   if (/model.*not.*found|modelnotfound/.test(lower)) return { id: 'model', kind, severity: 'error', message: 'Codex 当前模型不可用；检查模型选择后重试。', details: message.slice(0, 2000) }

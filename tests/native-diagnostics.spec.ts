@@ -9,6 +9,14 @@ describe('native diagnostics', () => {
     expect(classifyFailure('modelNotFound', 'missing')).toMatchObject({ id: 'model', severity: 'error' })
     expect(classifyFailure('serverOverloaded', 'temporary')).toMatchObject({ id: 'turn', severity: 'error' })
   })
+  it('reports provider client rejection separately from invalid credentials', () => {
+    const upstream = 'AgentRouter: unauthorized client detected, contact support for assistance'
+    const diagnostic = classifyFailure('unauthorized', upstream)
+    expect(diagnostic).toMatchObject({ id: 'client', severity: 'error', details: upstream })
+    expect(diagnostic.message).toContain('clientName')
+    expect(diagnostic.message).not.toContain('登录')
+    expect(classifyFailure('unauthorized', 'invalid API key')).toMatchObject({ id: 'auth' })
+  })
   it('retains only relevant diagnostics, deduplicates ids and clears recovered MCP/quota', () => {
     let state = initialNativeState()
     const diagnostics = new NativeDiagnostics(() => state, entries => { state = { ...state, diagnostics: entries } })

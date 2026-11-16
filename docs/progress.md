@@ -1,12 +1,12 @@
 # Codex 插件开发进度
 
-最后更新：2026-11-13，Asia/Shanghai。
+最后更新：2026-11-16，Asia/Shanghai。
 
 开发范围与验收标准见 [接入计划](implementation-plan.md)，架构说明见 [接入设计](design.md)。本文件保存阶段状态、验证记录和继续开发入口。
 
 ## 当前状态
 
-当前版本：`0.1.0`，尚未发布。M1–M5 后端与命令已逐项实现并验证；M3.4 Goal 真实跨回合与 M4.4 子代理真实生命周期仍待验收。模型菜单首启只显示 Default 的缺陷已修复：插件启动即通过短暂 App Server 连接发现模型，不创建 thread；无缓存时目录查询会等待发现完成，结果发出模型目录更新事件。当前 15 文件 82 项测试、类型检查、本机协议检查通过；真实已登录文字回合已有记录。完整图形与交互、真实故障验收继续保留未完成状态。
+当前版本：`0.1.1`，尚未发布。M1–M5 后端与命令已逐项实现并验证；M3.4 Goal 真实跨回合与 M4.4 子代理真实生命周期仍待验收。模型菜单首启只显示 Default 的缺陷已修复：插件启动即通过短暂 App Server 连接发现模型，不创建 thread；无缓存时目录查询会等待发现完成，结果发出模型目录更新事件。客户端名称默认改为 `codex_dsh` 并支持 `clientName` 配置，会话和模型发现统一初始化；客户端被拒绝的错误独立于登录错误。当前 16 文件 91 项测试、类型检查、本机协议检查和本地请求头抓包通过；用户已确认本次修复完成，AgentRouter 接入的自动验证仍限于本地请求头检查。真实已登录文字回合已有历史记录。完整图形与交互、真实故障验收继续保留未完成状态。
 
 | 阶段 | 状态 | 已完成内容 | 下一步 |
 | --- | --- | --- | --- |
@@ -47,6 +47,9 @@
 | 2026-11-13 | 真实持久日志核对 | 通过 | 10 个完整 zstd 帧、35 事件；原生边界、18746 token、875900 容量与诊断均落盘 |
 | 2026-11-13 | 最终打包／文档检查 | 通过 | 包内 66 文件，13 项关键产物与当前文件一致；5 份文档、13 本地链接、31 个唯一任务编号 |
 | 2026-11-13 | 启动阶段模型发现回归 | 通过 | 分页读取原生模型、不创建 thread、完整更新 catalog 并发出菜单刷新；重复 cursor 防环；真实 smoke 使用同一读取函数 |
+| 2026-11-16 | `pnpm test` / `pnpm typecheck` | 通过，16 文件 91 项 | 配置默认值、自定义名称与非法头值、真实会话握手、供应商客户端拒绝分类 |
+| 2026-11-16 | `pnpm test:local` | 通过 | CLI 0.169.0，9 模型、线程、Plan、名称、暂停 Goal、预算、0 模型回合，UA 为 codex_dsh |
+| 2026-11-16 | 本地 HTTP 请求头检查 | 通过 | 临时 CODEX_HOME、假密钥、loopback 服务，确认默认与配置的 originator / User-Agent；未请求 AgentRouter |
 | 待执行 | 完整真实交互与图形验收 | 待验收 | 图片／工具／审批／恢复／分叉／Plan、Goal 跨回合、子代理、故障恢复 |
 
 ## 继续开发入口
@@ -55,7 +58,7 @@
 2. 在独立验收 profile 中逐项做 M6.2：真实图片、工具、允许／拒绝／取消、恢复／分叉、名称与 Plan；沿用 `.refs/verification/codex-acceptance.patch.yml`，避免修改默认 profile。
 3. 对 M3.4 的两回合 Goal 与重启、M4.4 的并发代理／父子停止和 M6.3 的真实进程故障分别留证据；未完成前不勾选。
 4. 当前 headless 文字证据保存在工作区 `.refs/verification/dsh-acceptance-result.json`，对应会话 `session-19e68182-ebae-4487-ae4d-f716c811af30`。候选包 hash 和验收限制已保留；后续真实测试应核对实际安装内容，避免同版本 tar 缓存。
-5. 安装包位于工作区 `.refs/verification/tavlo-plugins-codex-0.1.0.tgz`；按内容 hash 副本安装可避免旧 tar 缓存。当前为未发布版本，发布是独立动作。
+5. 当前 `0.1.1` 的打包与安装命令见 README。既有 `web` profile 已通过 `link:` 引用源码目录，构建后重启即可更新；改装 tar 时保留依赖别名 `tavlo-plugins-codex`。用户已授权本次发布；GitHub Actions 工作流与 npm 受信任发布者配置见 README。
 
 ## 开发日志
 
@@ -155,3 +158,17 @@
 - 第一次隔离 headless 不发模型调用的探针故意使用缺失 provider，DSH 立即退出并取消尚未完成的异步发现，没有缓存产物；不计为通过。随后加入 adapter 等待机制，使模型目录请求本身等待。本机协议 smoke 验证 CLI 0.167.2 可在 initialized 通知前分页读取 9 个模型，再继续正常 thread smoke。
 - 全量类型检查、15 文件 82 项测试、构建与本机 smoke 通过。尚未在图形 UI 中直接复验下拉菜单；安装更新包后需重启 DSH 检查 Codex 分组出现原生模型。
 - 更新安装包：执行 `pnpm pack --pack-destination ../.refs/verification`；内容 hash 文件用于避免 pnpm 对相同版本／路径复用旧包。M6 的真实图形菜单确认仍待用户环境验收。
+
+### 2026-11-16 Codex 客户端标识与供应商诊断
+
+- AgentRouter 返回 `unauthorized client detected`，截图显示 Agent 为 `tavlo_dsh`。本地 CLI 0.169.0 抓包确认 App Server 的 clientInfo.name 会写入 originator，并成为 User-Agent 前缀；同机 codex exec 使用 codex_exec，标准请求头集合相同。
+- 新增共享初始化构造函数，默认名称改为描述实际集成的 `codex_dsh`，显示 title 保持 Tavlo DSH，版本取自 package.json。增加 clientName 配置并校验 HTTP 头值，会话、模型发现与真实协议 smoke 使用同一函数。
+- 供应商客户端拒绝诊断提示核对 clientName 和 originator / User-Agent，不再误导用户重新登录。普通失效凭据仍分类为认证错误。
+- 全量 91 项测试、类型检查、构建和本机隔离协议检查通过。共享函数生成的默认名称和自定义名称均在 loopback 实际 HTTP 请求中得到验证，证据在 `.refs/verification/codex-client-identity-0.1.1-probe.json`。
+- 用户已确认本次修复完成并授权提交 GitHub、发布 npm。供应商截图没有列出精确的请求头规则，自动验证仍以本地请求头为证据；其他供应商应按其认可的集成名称配置。此次未修改用户的认证配置或重启其运行中的 DSH。
+
+### 2026-11-16 GitHub Actions 发布准备
+
+- 增加 `.github/workflows/publish.yml`，使用锁文件安装、类型检查、91 项测试、构建及 npm 包预览；版本标签或 main 上的手动发布使用 OIDC 与 provenance。
+- 追加 0.1.1 变更记录，包含客户端身份、诊断和彩色 Codex 图标；图标原样使用用户提供的 SVG，并在独立文件保留许可。
+- npm 注册表当前 latest 为 0.1.0；配置 Trusted Publisher 时 npm 要求账户双重认证，需维护者本人完成。0.1.1 尚未发布。

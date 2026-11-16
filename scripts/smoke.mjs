@@ -8,6 +8,7 @@ import { AppServerClient } from '../lib/app-server.js'
 import { locateCodexHere } from '../lib/executable.js'
 import { fetchCodexModels } from '../lib/models.js'
 import { codexSpawnSpec } from '../lib/spawn.js'
+import { codexInitializeParams } from '../lib/client-identity.js'
 
 const executable = locateCodexHere()
 if (!executable) throw new Error('Install the local Codex CLI before running this check')
@@ -24,7 +25,7 @@ try {
     notification() {}, request: message => client.reject(message.id, 'No interactive requests in a smoke check'),
     failure: error => console.error(error.message),
   }, 15000, () => {})
-  const initialized = await client.request('initialize', { clientInfo: { name: 'tavlo_dsh_smoke', version: '0.1.0' }, capabilities: { experimentalApi: true, requestAttestation: false } })
+  const initialized = await client.request('initialize', codexInitializeParams())
   const models = await fetchCodexModels(client)
   client.notify('initialized')
   const started = await client.request('thread/start', {

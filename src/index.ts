@@ -33,6 +33,7 @@ import { codexSpawnSpec } from './spawn.ts'
 import { initialNativeState, nativeStateProjection, publishNativeState } from './native-state.ts'
 import type { NativeState } from './native-state.ts'
 import { codexCommand } from './commands.ts'
+import { codexInitializeParams, DEFAULT_CLIENT_NAME } from './client-identity.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -45,6 +46,7 @@ declare module '@deepseek-ai/cordis' {
 }
 export interface Config {
   executable: string
+  clientName: string
   inheritCredentials: boolean
   env: Record<string, string>
   requestTimeoutMs: number
@@ -62,6 +64,7 @@ export default class TavloCodex extends Service {
   static inject = ['llm', 'agents', 'tools', 'subprocess', 'sessionProjections', 'commands']
   static Config: z<Config> = z.object({
     executable: z.string().default(''),
+    clientName: z.string().default(DEFAULT_CLIENT_NAME),
     inheritCredentials: z.boolean().default(true),
     env: z.dict(z.string()).default({}),
     requestTimeoutMs: z.natural().min(1).default(60_000),
@@ -80,8 +83,9 @@ export default class TavloCodex extends Service {
 
   constructor(ctx: Context, private readonly config: Config) {
     super(ctx, 'tavloCodex')
+    codexInitializeParams(config.clientName)
     this.executable = locateCodexHere(config.executable || undefined)
-    if (this.executable) ctx.logger.info(`using Codex at ${this.executable.path}`)
+    if (this.executable) ctx.logger.info(`using Codex at ${this.executable.path}, client ${config.clientName ?? DEFAULT_CLIENT_NAME}`)
     else ctx.logger.warn('未找到本机 Codex。请安装 @openai/codex 并登录，或配置 executable。')
     const homePath = ctx.get('dshHomePath') ?? ((...parts: string[]) => join(homedir(), '.dsh', ...parts))
     this.catalog = new ModelCatalog(PROVIDER, homePath(PLUGIN_HOME, 'models.json'),
@@ -168,7 +172,7 @@ export default class TavloCodex extends Service {
       )
       activeClient = client
       this.discoveryClient = client
-      await client.request('initialize', { clientInfo: { name: 'tavlo_dsh', title: 'Tavlo DSH', version: '0.1.0' }, capabilities: { experimentalApi: true, requestAttestation: false } })
+      await client.request('initialize', codexInitializeParams(this.config.clientName))
       if (this.discoveryStopped) return
       const models = await fetchCodexModels(client)
       if (!this.discoveryStopped) this.catalog.update(models)
@@ -199,7 +203,7 @@ export default class TavloCodex extends Service {
     const hostTitle = this.ctx.get('sessionTitle')?.get(agent.session)
     if (hostTitle) state.name = { ...state.name, title: hostTitle.title, pinned: hostTitle.source.kind === 'user' }
     return new CodexSession({
-      dshSessionId: id, cwd, provider: PROVIDER,
+      dshSessionId: id, cwd, provider: PROVIDER, clientName: this.config.clientName,
       sentMessageIds: start.sentMessageIds, inheritedReplay: start.inheritedReplay, after: start.after,
       cancelGraceMs: this.config.cancelGraceMs,
       nativeState: state,

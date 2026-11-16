@@ -29,6 +29,7 @@ import type { NativeImageStore } from './native-images.ts'
 import { boundedOutput, NativeProgress } from './native-progress.ts'
 import { classifyFailure, NativeDiagnostics } from './native-diagnostics.ts'
 import { fetchCodexModels } from './models.ts'
+import { codexInitializeParams } from './client-identity.ts'
 
 export interface PermissionAsk { readonly reason: string; readonly callId?: string }
 export type AskFn = (request: PermissionAsk, signal: AbortSignal) => Promise<ApprovalOutcome>
@@ -43,6 +44,7 @@ export interface CodexSessionDeps {
   readonly dshSessionId: string
   readonly cwd: string
   readonly provider: string
+  readonly clientName?: string
   readonly sentMessageIds: ReadonlySet<string>
   readonly inheritedReplay?: ReturnType<typeof readNativeReplay>
   readonly nativeState: NativeState
@@ -374,7 +376,7 @@ export class CodexSession {
     const cancelStartup = (): void => { void server.close() }
     signal.addEventListener('abort', cancelStartup, { once: true })
     try {
-      await server.request('initialize', { clientInfo: { name: 'tavlo_dsh', title: 'Tavlo DSH', version: '0.1.0' }, capabilities: { experimentalApi: true, requestAttestation: false } })
+      await server.request('initialize', codexInitializeParams(this.deps.clientName))
       signal.throwIfAborted()
       server.notify('initialized')
       void server.request('account/read', { refreshToken: false }).then(value => {

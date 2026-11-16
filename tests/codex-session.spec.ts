@@ -81,6 +81,19 @@ function setup(overrides: Partial<CodexSessionDeps> = {}): { session: CodexSessi
 async function started(server: () => FakeServer): Promise<void> { await vi.waitFor(() => expect(server().counter).toBeGreaterThan(0)) }
 
 describe('native Codex conversation', () => {
+  it.each([undefined, 'provider_approved_dsh'])(
+    'uses the configured Codex client identity (%s) in the real session handshake', async clientName => {
+      const { session, server } = setup({ clientName })
+      const stream = collect(session.stream(options()))
+      await started(server)
+      expect(server().calls.find(call => call.method === 'initialize')?.params).toMatchObject({
+        clientInfo: { name: clientName ?? 'codex_dsh', title: 'Tavlo DSH' },
+        capabilities: { experimentalApi: true, requestAttestation: false },
+      })
+      server().end()
+      await stream
+    },
+  )
   it('steers exactly once and never resubmits the acknowledged message as queued input', async () => {
     const { session, server } = setup()
     const first = collect(session.stream(options())); await started(server)
