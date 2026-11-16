@@ -51,7 +51,7 @@ export function shimTarget(shimPath: string, content: string): string | undefine
   const quoted = [...content.matchAll(/"([^"]+)"/g)].map((match) => match[1] ?? '')
   const candidates = quoted
     .filter((text) => /%~?dp0%?/i.test(text))
-    .map((text) => resolve(dir, text.replace(/%~?dp0%?\\?/gi, '')))
+    .map((text) => resolve(dir, text.replace(/%~?dp0%?\\?/gi, '').replaceAll('\\', '/')))
     .filter((path) => {
       const ext = extname(path).toLowerCase()
       return ext === '.exe' || SCRIPT_EXTENSIONS.has(ext)

@@ -172,3 +172,4 @@
 - 增加 `.github/workflows/publish.yml`，使用锁文件安装、类型检查、91 项测试、构建及 npm 包预览；版本标签或 main 上的手动发布使用 OIDC 与 provenance。
 - 追加 0.1.1 变更记录，包含客户端身份、诊断和彩色 Codex 图标；图标原样使用用户提供的 SVG，并在独立文件保留许可。
 - npm 注册表当前 latest 为 0.1.0；配置 Trusted Publisher 时 npm 要求账户双重认证，需维护者本人完成。0.1.1 尚未发布。
+- 首次 Ubuntu 工作流中 90 项测试通过，Windows shim 测试因宿主路径分隔符不同失败；统一 shim 路径分隔符后重新验证。

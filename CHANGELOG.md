@@ -7,3 +7,4 @@
 - 将供应商客户端拒绝与凭据认证失败分别诊断，避免将 `unauthorized client detected` 提示为需要重新登录。
 - 使用彩色 Codex SVG 图标，并保留图标许可。
 - 增加 GitHub Actions 验证与 npm OIDC 发布工作流。
+- 统一 Windows npm shim 内的路径分隔符，使可执行文件解析也能在 Linux 验证环境中运行。
