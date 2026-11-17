@@ -1,12 +1,14 @@
 # dsh-plugin-codex-app-server
 
+[![npm version](https://img.shields.io/npm/v/dsh-plugin-codex-app-server.svg)](https://www.npmjs.com/package/dsh-plugin-codex-app-server)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-plugin-codex-app-server.svg)](https://www.npmjs.com/package/dsh-plugin-codex-app-server)
+[![license](https://img.shields.io/npm/l/dsh-plugin-codex-app-server.svg)](https://www.npmjs.com/package/dsh-plugin-codex-app-server)
+
 DeepSeek Harness（DSH）插件：通过本机 **`codex app-server`** 把 Codex 注册为模型提供方 `codex`。每个 DSH 会话拥有一个常驻进程和一个原生 Codex thread，使用标准输入／输出上的双向 JSON-RPC 通信。
 
 Codex 自己负责 agent loop、system prompt、工具执行、AGENTS.md、原生配置与登录态、MCP、skills、子代理和自动压缩。DSH 负责展示文本与思考、镜像工具卡片、权限审批和用户提问。插件通过 `/codex` 提供 Plan、名称、Goal、子代理、用量与执行交互入口，并通过 `tavloCodex` 会话投影发布状态，供统一 UI 接入。
 
-接口依据：[官方 Codex App Server 文档](https://learn.chatgpt.com/docs/app-server)。已在 Windows、DSH `0.2.2-rc.1`、本机 `codex-cli 0.167.2` 上通过真实已登录文字回合，返回 `CODEX_DSH_OK` 并正常结束；Plan、命名和暂停 Goal 的原生协议检查也已通过。完整图形交互及旧版 CLI 兼容性待验收。
-
-后续能力接入见 [开发计划](docs/implementation-plan.md)；当前阶段、已知缺口、验证结果和继续开发入口见 [进度记录](docs/progress.md)。
+接口依据：[官方 Codex App Server 文档](https://learn.chatgpt.com/docs/app-server)。
 
 ## 安装
 
@@ -23,12 +25,6 @@ codex login
 dsh plugin --profile web add dsh-plugin-codex-app-server
 ```
 
-更新到本次修复版本：
-
-```bash
-dsh plugin --profile web add dsh-plugin-codex-app-server@0.1.1
-```
-
 从源码安装：
 
 ```bash
@@ -38,26 +34,11 @@ pnpm build
 dsh plugin --profile web add "$(pwd)"
 ```
 
-Windows 本地安装或更新可使用打包文件：
-
-```powershell
-Set-Location F:\github\tavlo-dsh-plugins\tavlo-plugins-codex
-pnpm install
-pnpm pack --pack-destination ..\.refs\verification
-dsh plugin --profile web add "F:\github\tavlo-dsh-plugins\.refs\verification\dsh-plugin-codex-app-server-0.1.1.tgz"
-```
-
-`pack` 会通过 `prepack` 自动构建。`web` 应替换成实际使用的 profile；安装后重启该 DSH profile，让会话启动新的 Codex App Server 进程。
-
-已通过 `link:` 引用本地源码目录的 profile，执行 `pnpm build` 后重启 DSH 即可更新。已有依赖别名 `tavlo-plugins-codex` 的 profile 改装打包文件时，保留原别名和 bundle 配置：
-
-```powershell
-dsh plugin --profile web add "tavlo-plugins-codex@file:F:/github/tavlo-dsh-plugins/.refs/verification/dsh-plugin-codex-app-server-0.1.1.tgz"
-```
+`web` 应替换成实际使用的 profile；安装后重启该 DSH profile，让会话启动新的 Codex App Server 进程。
 
 插件启动时会短暂启动本机 App Server 查询 `model/list`，不创建 Codex thread；如果模型目录先来查询且还没有缓存，provider 会等待这次发现完成再返回列表。完成后菜单刷新并缓存模型及推理强度到 DSH home 的 `tavlo-codex/models.json`。查询完成前仍可选择 **Codex / Default**，它使用本机 Codex 配置的模型。若查询失败，检查 DSH 日志和 Codex CLI 登录状态，然后重启 DSH 重试。
 
-## 运行行为
+## 运行方式
 
 | 方面 | 行为 |
 | --- | --- |
@@ -131,37 +112,42 @@ dsh plugin --profile web add "tavlo-plugins-codex@file:F:/github/tavlo-dsh-plugi
 | `disposeGraceMs` | `3000` | DSH 终止子进程时的信号升级间隔。 |
 | `auxiliary` | 上例 | 标题、摘要等辅助模型请求的路由。 |
 
-`0.1.1` 将此前写死的 `tavlo_dsh` 改为可配置的 `codex_dsh`，并统一会话与模型发现的初始化。插件运行的仍是本机 Codex；`Tavlo DSH` 显示名称保留。遇到 `unauthorized client detected` 时，诊断会提示核对供应商的客户端识别规则，而非要求重新登录。本地实际请求头已验证，用户已确认本次修复完成；其他供应商的客户端白名单仍按其接入要求配置。
+遇到 `unauthorized client detected` 时，先核对供应商要求的插件客户端名称（见上方 `clientName`），而不是重新登录。
 
 供应商要求额外请求头时，在实际使用的 `CODEX_HOME/config.toml` 的 `[model_providers.<id>]` 中配置 `http_headers` 或 `env_http_headers`。具体名称和值以供应商文档为准；DSH 中其他模型适配器的请求头不会自动注入此插件启动的原生 Codex。
+
+### 辅助请求（标题、摘要）
 
 辅助请求转交给其他普通模型提供方，避免进入用户真实的 Codex thread。先尝试 `auxiliary.routes` 中的 `{ provider, model }`，然后自动发现，记住首个成功路由。自动发现会跳过 `codex` 和 `claude-code`，防止两个原生会话插件互相转发。失败路由 60 秒内跳过；已经输出任何分片后不会换路重放。
 
 例如，要固定标题生成路由，可设置：
 
 ```yaml
-auxiliary:
-  enabled: true
-  routes:
-    - provider: deepseek-official
-      model: deepseek-flash
-  discovery: false
+- id: tavlo-codex
+  name: dsh-plugin-codex-app-server
+  config:
+    auxiliary:
+      enabled: true
+      routes:
+        - provider: deepseek-official
+          model: deepseek-flash
+      discovery: false
 ```
 
-## 当前限制
+## 限制
 
 - 这是服务端接入，保留 Codex 的原生工具和指令。DSH 的 system prompt、工具定义及历史编辑不会重新注入 Codex 原生记录。
 - 权限选择的沙箱映射在新原生回合开始时生效；回合中切换权限不会回溯修改正在运行的原生沙箱。已经发出的审批请求会读取当前 DSH 选择。
 - DSH Auto 审查预设依赖宿主工具执行链；Codex 原生工具不经过该链，因此暂不支持。请使用明确的沙箱和审批组合。
 - DSH 内置 token-meter 共用单次 usage 统计消耗与上下文，不能准确表示原生多次模型调用。Codex 权威统计使用独立投影；未知旧线程恢复／分叉首通知只计最近调用，标记 `inferred`，此前未观测调用可能少计。
-- Goal 当前采用每个 DSH 回合结束自动暂停的有界策略，尚未开放无人干预的原生连续循环。真实跨回合／重启验收待完成。
-- 子代理内部的文本与工具事件不逐条进入主聊天；详情按需读取，不为订阅而恢复子线程。父边界请求中断已观测的活跃子代理，真实并发订阅／父子停止／重启仍待验收；审批保留实际请求者身份。
-- 图片输出支持可读的本地路径及直接 base64 结果。只有 `fileId` 的输出没有受支持的下载接口，会显示限制；图片预览与实时工具进度还需图形界面验收。
+- Goal 采用每个 DSH 回合结束自动暂停的有界策略，暂不支持无人干预的连续循环。
+- 子代理内部的文本与工具事件不逐条进入主聊天；详情按需读取，不为订阅而恢复子线程。可中断已观测的活跃子代理；并发订阅、父子停止和重启场景尚未支持。审批保留实际请求者身份。
+- 图片输出支持可读的本地路径及直接 base64 结果。只有 `fileId` 的输出没有受支持的下载接口，会显示限制；图形界面尚未提供图片预览与实时工具进度。
 - 文件卡片展示 Codex 报告的补丁片段，不代表完整文件快照。没有在工具开始事件中提供的内容仍可在原始结果里查看。
 - 进程崩溃后可恢复原生线程历史，但不会自动重放状态不明的请求；需要用户发送下一条消息。辅助路由不可用时由 DSH 使用兜底标题。
 - 当前没有实现原生登录 UI、插件管理 UI、复杂 MCP 表单及 app-server 动态工具执行。请先在终端配置好 Codex；未支持的客户端请求会收到明确的 JSON-RPC 错误。
 
-## 开发与验证
+## 开发
 
 ```bash
 pnpm typecheck
@@ -171,14 +157,6 @@ pnpm test:local
 pnpm pack
 ```
 
-`test:local` 使用临时的独立 `CODEX_HOME` 验证真实 CLI 的初始化、模型列表、线程、Plan 设置、名称、暂停 Goal、预算修改和清除；不发送模型回合，不使用现有登录态。单元与集成测试使用可控的 App Server 消息验证会话、统计、审批、恢复／分叉、取消、进程失败、图片、原生控制和 DSH 辅助路由。
+设计说明见 [docs/design.md](docs/design.md)。
 
-真实已登录文字验收使用独立 `DSH_HOME` 和工作目录，未修改用户默认 DSH profile。它验证装载、权限映射、回复、日志中的原生状态与进程退出；其他真实交互仍在 [开发计划](docs/implementation-plan.md) 中保留待验收状态。
-
-## npm 发布
-
-`.github/workflows/publish.yml` 先执行类型检查、测试和构建，再通过 npm Trusted Publishing（OIDC）发布，不使用长期 npm token。推送与 `package.json` 版本匹配的标签（如 `v0.1.1`）会触发发布；也可在 GitHub Actions 手动运行，勾选 `publish` 时必须从 `main` 发布，不勾选则仅验证。
-
-首次启用时，在 npm 包设置的 Trusted Publisher 中选择 GitHub Actions：组织 `Tavlo-dsh`，仓库 `tavlo-plugins-codex`，工作流文件 `publish.yml`，环境名称留空，并允许直接发布。也可使用 npm CLI 的 `npm trust github dsh-plugin-codex-app-server --repo Tavlo-dsh/tavlo-plugins-codex --file publish.yml --allow-publish` 完成绑定；npm 可能要求账户双重认证。
-
-设计细节见 [docs/design.md](docs/design.md)。
+变更记录见 [CHANGELOG.md](CHANGELOG.md)。
