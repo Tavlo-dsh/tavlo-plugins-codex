@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-codex-app-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "在 DeepSeek Harness 里通过 Codex App Server 运行本机 Codex（完整 Codex harness）",
   "license": "MIT",
   "author": "Tavlo-dsh",
@@ -32,6 +32,7 @@
     "docs/design.md",
     "docs/implementation-plan.md",
     "docs/progress.md",
+    "docs/permissions-verification.md",
     "docs/compatibility.md",
     "CHANGELOG.md",
     "README.md"
@@ -48,6 +49,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:local": "pnpm build && node scripts/smoke.mjs",
+    "test:local:permissions": "pnpm build && node scripts/verify-live-permissions.mjs",
     "prepack": "pnpm build"
   },
   "engines": {

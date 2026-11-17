@@ -42,6 +42,7 @@ export class SessionRegistry {
   private readonly sessions = new Map<string, CodexSession>()
   private readonly stopping = new Map<string, Promise<void>>()
   private readonly turnMessages = new Map<string, Set<string>>()
+  private readonly permissionChanges = new Set<string>()
 
   constructor(private readonly deps: RegistryDeps) {}
 
@@ -57,6 +58,22 @@ export class SessionRegistry {
    */
   observeEvent(sessionId: string, event: ObservedEvent): void {
     switch (event.type) {
+      case 'permission/preset':
+      case 'sandbox/mode':
+      case 'approval/policy': {
+        if (this.permissionChanges.has(sessionId)) return
+        const session = this.sessions.get(sessionId)
+        if (!session) return
+        this.permissionChanges.add(sessionId)
+        // A preset writes multiple knob events synchronously. Read the final
+        // values outside append observers, where projection writes are legal.
+        queueMicrotask(() => {
+          this.permissionChanges.delete(sessionId)
+          if (this.sessions.get(sessionId) !== session) return
+          void session.refreshPermissions().catch(error => this.deps.warn(`Codex 权限同步失败：${String(error)}`))
+        })
+        return
+      }
       case 'turn/start':
         this.turnMessages.set(sessionId, new Set())
         return

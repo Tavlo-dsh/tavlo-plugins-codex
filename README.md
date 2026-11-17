@@ -47,7 +47,7 @@ dsh plugin --profile web add "$(pwd)"
 | 分叉 | 继承父会话的 replay state 时，使用 `thread/fork`，并传入保存的 `lastTurnId`。Codex 分叉粒度是原生回合；正在执行的原生回合可能被拒绝分叉。缺少回合边界时明确报错。 |
 | 工具 | 顶层命令、文件修改、MCP、网页搜索、图片工具和子代理调用镜像为 `codex_tool`。命令显示终端卡片，文件修改显示 diff 卡片。实际操作始终由 Codex 执行。 |
 | 审批 | 命令／文件审批映射为 DSH 审批卡片；允许一次返回 `accept`，拒绝返回 `decline`，取消返回 `cancel`。不写入 Codex 永久规则。额外权限申请最多授予本回合。 |
-| 沙箱 | 每个新原生回合读取 DSH 的实际沙箱和审批设置，支持只读、工作区可写、完整访问及派生 `custom` 组合。额外工作区写目录保留；`never` 映射为 Codex `never`，其他支持的审批策略使用 `on-request`。DSH Auto 预设暂不支持，会明确报错。 |
+| 沙箱 | 读取 DSH 的实际沙箱和审批设置，支持只读、工作区可写、完整访问及派生 `custom` 组合。运行中调整权限会取消旧审批、停止当前原生回合，再在同一线程按新权限接续任务；无需手动发送下一条消息。额外工作区写目录保留；`never` 映射为 Codex `never`，其他支持的审批策略使用 `on-request`。DSH Auto 预设暂不支持，会明确报错。 |
 | 提问 | `item/tool/requestUserInput` 转为 DSH 问题卡片，按原始问题 id 返回回答。无法展示时返回空回答，不捏造选择。 |
 | MCP elicitation | 支持简单平面表单的字符串、枚举、数字、整数和布尔字段。URL 模式展示链接，等待用户手动完成后确认。复杂表单拒绝，密码字段不通过对话日志收集。 |
 | 停止 | 图片准备阶段取消不提交消息；原生回合开始后调用 `turn/interrupt`，超过 `cancelGraceMs` 仍未完成则终止进程。插件停止或会话释放时由 DSH 回收子进程。 |
@@ -165,9 +165,12 @@ pnpm typecheck
 pnpm test
 pnpm build
 pnpm test:local
+pnpm test:local:permissions
 pnpm pack
 ```
 
-设计说明见 [docs/design.md](docs/design.md)。
+`test:local:permissions` 使用本机 Codex、独立临时配置和 loopback 模拟模型，验证运行中提升／收紧权限与取消待审批请求，不使用用户凭据或付费模型服务。切换权限会中断当时的命令；已产生的外部效果不会回滚，接续指令要求先核对不确定结果。停止超时或新权限被拒绝时，插件结束原生进程并报告错误。已有 DSH 进程需重新加载本插件才能使用更新后的 Host 代码。
+
+设计说明见 [docs/design.md](docs/design.md)，权限行为与验证见 [docs/permissions-verification.md](docs/permissions-verification.md)。
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)。

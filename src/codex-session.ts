@@ -4,7 +4,7 @@ import type { FinishReason, RequestMessage, StreamChunk } from '@deepseek-ai/dsh
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type { AppServer, ServerHandlers } from './app-server.ts'
 import { RpcError } from './app-server.ts'
-import { AsyncQueue, abortReason } from './async-queue.ts'
+import { AsyncQueue, abortReason, untilAborted } from './async-queue.ts'
 import { DEFAULT_MODEL_ID, MIRROR_TOOL_NAME } from './constants.ts'
 import { itemOutcome, TOOL_TYPES } from './events.ts'
 import type { ToolOutcome } from './events.ts'
@@ -72,7 +72,9 @@ type ReaderEvent =
 interface Call { outcome?: ToolOutcome; settling?: boolean; synthetic: boolean }
 interface PendingRequest { message: RpcRequest; key: string }
 interface QueuedInput { input: UserInput; request: StepRequest }
+interface PermissionBoundary { turnId: string; completed(status: string): void }
 const NEVER = new AbortController().signal
+const PERMISSION_CONTINUATION = 'DSH 已按用户刚刚选择的权限停止上一原生回合，并用新的沙箱和审批设置接续同一任务。请根据线程历史继续尚未完成的工作；不要重新执行已完成的操作。中断时尚未确认结果的操作应先检查实际状态，再决定是否重试。'
 const ABORTED: FinishReason = { kind: 'aborted', failure: { message: '已停止', code: 'ABORTED' } }
 
 /** Broadcast notification whose aborting waiters are actually removed. */
@@ -129,6 +131,12 @@ export class CodexSession {
   private readonly diagnostics: NativeDiagnostics
   private readonly now: () => number
   private progressTimer: ReturnType<typeof setTimeout> | undefined
+  private appliedPolicy: string | undefined
+  private activeRequest: StepRequest | undefined
+  private permissionUpdates: Promise<void> = Promise.resolve()
+  private permissionSyncing = false
+  private permissionBoundary: PermissionBoundary | undefined
+  private permissionAbort = new AbortController()
 
   constructor(private readonly deps: CodexSessionDeps) {
     this.sent = new Set(deps.sentMessageIds)
@@ -152,6 +160,69 @@ export class CodexSession {
     return this.threadId === undefined ? this.deps.inheritedReplay : {
       codexSessionId: this.threadId, dshSessionId: this.deps.dshSessionId,
       ...(this.turnId === undefined ? {} : { codexTurnId: this.turnId }),
+    }
+  }
+
+  /** Native permissions are frozen per turn: interrupt, then continue once. */
+  refreshPermissions(): Promise<void> {
+    const update = this.permissionUpdates.then(() => this.syncPermissions())
+    this.permissionUpdates = update.catch(() => undefined)
+    return update
+  }
+  private async syncPermissions(): Promise<void> {
+    if (!this.server || !this.threadId || this.failure || this.cancellation) return
+    const signal = AbortSignal.any([this.lifetime.signal, this.turnAbort.signal])
+    this.permissionSyncing = true
+    let boundary: PermissionBoundary | undefined
+    try {
+      const policy = this.deps.policy()
+      if (JSON.stringify(policy) === this.appliedPolicy) return
+      // A settings event may race the response to turn/start. Never interrupt
+      // an unknown id or start a second turn until that submission settles.
+      while (this.busy && !this.turnId) await this.changes.next(signal)
+      signal.throwIfAborted()
+      let status: string | undefined
+      if (this.busy && this.turnId) {
+        const ended = new Promise<string>(resolve => { boundary = { turnId: this.turnId!, completed: resolve } })
+        this.permissionBoundary = boundary
+        this.diagnostics.set({ id: 'permissions', kind: 'permissions', severity: 'info', message: '权限已变更，正在停止旧回合并按新设置接续。' })
+        this.permissionAbort.abort(new Error('Codex 权限已变更，取消旧回合输入请求。'))
+        this.cancelRequests()
+        this.stopChildren()
+        const deadline = AbortSignal.any([signal, AbortSignal.timeout(this.deps.cancelGraceMs)])
+        const interrupted = this.server.request('turn/interrupt', { threadId: this.threadId, turnId: boundary!.turnId })
+          .catch(error => {
+            // The turn may have naturally finished just before the interrupt.
+            // Only its observed terminal event makes this race unambiguous.
+            if (!this.busy && error instanceof RpcError) return
+            throw error
+          })
+        const [terminal] = await untilAborted(Promise.all([ended, interrupted]), deadline)
+        // turn/completed can extend these chains; capture them only after it.
+        await untilAborted(Promise.all([this.childrenBoundary, this.goalBoundary]), deadline)
+        status = terminal
+      }
+      signal.throwIfAborted()
+      // Coalesce further selections made while the old turn was stopping.
+      const latest = this.deps.policy()
+      await untilAborted(this.server.request('thread/settings/update', { threadId: this.threadId, ...latest }), signal)
+      signal.throwIfAborted()
+      this.appliedPolicy = JSON.stringify(latest)
+      if (status === 'interrupted' && this.activeRequest) {
+        this.permissionBoundary = undefined
+        await this.submit({ ids: [], blocks: [{ type: 'text', text: PERMISSION_CONTINUATION }] }, this.activeRequest, signal, true)
+      }
+      this.diagnostics.set({ id: 'permissions', kind: 'permissions', severity: 'info', message: 'Codex 已应用当前会话的沙箱与审批设置。' })
+    } catch (error) {
+      if (signal.aborted) return
+      const failure = new LlmError(`Codex 运行中权限同步失败，已停止进程：${String(error)}`, 'CODEX_PERMISSION_UPDATE_FAILED')
+      this.diagnostics.set({ id: 'permissions', kind: 'permissions', severity: 'error', message: failure.message })
+      this.die(failure)
+      throw failure
+    } finally {
+      if (this.permissionBoundary === boundary) this.permissionBoundary = undefined
+      this.permissionSyncing = false
+      this.changes.notify()
     }
   }
 
@@ -185,7 +256,7 @@ export class CodexSession {
   async steer(id: string, message: string, signal: AbortSignal = NEVER): Promise<void> {
     signal.throwIfAborted(); this.throwIfDead()
     if (this.sent.has(id)) return
-    if (!this.server || !this.busy || !this.turnId || this.cancellation || this.controlling) throw new Error('没有可追加消息的活跃 Codex 回合；普通输入会排队到下一轮。')
+    if (!this.server || !this.busy || !this.turnId || this.cancellation || this.controlling || this.permissionSyncing) throw new Error('没有可追加消息的活跃 Codex 回合；普通输入会排队到下一轮。')
     if (!id || !message.trim()) throw new Error('追加消息不能为空。')
     const turnId = this.turnId
     this.sent.add(id)
@@ -265,7 +336,7 @@ export class CodexSession {
     void this.goalBoundary.catch(error => this.die(new Error(`Codex 目标边界暂停失败，已停止进程防止失管续跑：${String(error)}`)))
   }
   private async control<T>(request: StepRequest, action: () => Promise<T>, allowActive = false): Promise<T> {
-    if (this.controlling || (!allowActive && (this.busy || this.events.size || ['requested', 'running'].includes(this.nativeState.compaction.status)))) throw new Error('请先等待 Codex 当前任务结束，再修改会话。')
+    if (this.controlling || this.permissionSyncing || (!allowActive && (this.busy || this.events.size || ['requested', 'running'].includes(this.nativeState.compaction.status)))) throw new Error('请先等待 Codex 当前任务结束，再修改会话。')
     this.controlling = true
     try {
       await this.ensureInitialized(request, request.signal ?? NEVER)
@@ -316,6 +387,7 @@ export class CodexSession {
       await this.cancellation
       signal.throwIfAborted()
       await this.ensureInitialized(request, signal)
+      await this.permissionUpdates
       signal.throwIfAborted()
       const seen = new Set([...this.sent, ...this.reserved])
       const input = unseenUserInput(request.messages, seen, request.currentTurnMessageIds)
@@ -361,6 +433,7 @@ export class CodexSession {
   }
 
   abandonTurn(): void {
+    this.permissionAbort.abort(new Error('Codex turn interrupted'))
     if (this.failure === undefined) this.pauseGoalAtBoundary()
     this.stopChildren()
     this.progress.stop('interrupted')
@@ -469,7 +542,10 @@ export class CodexSession {
     if (!this.lifetime.signal.aborted) { this.nativeModels = models; this.deps.onModels(models) }
   }
 
-  private async submit(input: UserInput, request: StepRequest, signal: AbortSignal): Promise<void> {
+  private async submit(input: UserInput, request: StepRequest, signal: AbortSignal, permissionContinuation = false): Promise<void> {
+    if (!permissionContinuation) await this.permissionUpdates
+    signal.throwIfAborted()
+    this.throwIfDead()
     if (['requested', 'running'].includes(this.nativeState.compaction.status)) throw new Error('Codex 正在压缩上下文，请稍后重试。')
     for (const id of input.ids) this.reserved.add(id)
     let submitted = false
@@ -494,6 +570,9 @@ export class CodexSession {
       this.throwIfDead()
       const policy = this.deps.policy()
       this.turnAbort = new AbortController()
+      this.permissionAbort = new AbortController()
+      this.activeRequest = { ...request, messages: [], currentTurnMessageIds: new Set() }
+      this.appliedPolicy = JSON.stringify(policy)
       this.busy = true
       this.turnId = undefined
       this.turnStartedAt = undefined
@@ -502,7 +581,7 @@ export class CodexSession {
       this.nativeState = { ...this.nativeState, usage: this.usageTracker.snapshot }
       this.deps.publishNativeState(this.nativeState)
       this.streamed.clear()
-      this.calls.clear()
+      if (!permissionContinuation) this.calls.clear()
       this.updateState({ plan: { steps: [], text: '', final: false } })
       for (const id of input.ids) this.sent.add(id)
       this.updateState({ sentInputIds: [...this.sent].slice(-8192) })
@@ -520,6 +599,7 @@ export class CodexSession {
         }))
         this.turnId ??= text(record(result.turn).id) || undefined
         if (!this.turnId) throw new Error('Codex did not return a turn id')
+        this.changes.notify()
         this.usageTracker.setActiveTurnId(this.turnId)
         this.nativeState = { ...this.nativeState, turnId: this.turnId, usage: this.usageTracker.snapshot }
         this.deps.publishNativeState(this.nativeState)
@@ -575,6 +655,7 @@ export class CodexSession {
       if (this.nativeState.compaction.status === 'requested') this.turnId = text(record(p.turn).id) || this.turnId
       this.usageTracker.setActiveTurnId(this.turnId)
       if (this.cancellation !== undefined) this.interrupt()
+      this.changes.notify()
       return
     }
     if ((method === 'item/started' || method === 'item/completed') && record(p.item).type === 'contextCompaction') {
@@ -606,7 +687,13 @@ export class CodexSession {
       this.busy = false
       this.cancelRequests()
       for (const call of this.calls.values()) if (!call.settling) call.outcome ??= { text: 'Codex 回合已结束，没有返回工具结果。', isError: true }
+      const permissionBoundary = this.permissionBoundary
+      if (permissionBoundary && permissionBoundary.turnId === this.turnId) permissionBoundary.completed(text(turn.status))
       if (this.cancellation !== undefined) this.completeCancellation()
+      else if (permissionBoundary && permissionBoundary.turnId === this.turnId && turn.status === 'interrupted') {
+        // Keep the DSH operation open; syncPermissions will resume this thread
+        // without resending the user's input or discarding completed tools.
+      }
       else {
         const status = text(turn.status)
         const failureMessage = text(record(turn.error).message)
@@ -695,7 +782,7 @@ export class CodexSession {
   private serverRequest(message: RpcRequest): void {
     const supported = APPROVAL_METHODS.has(message.method) || message.method === 'item/tool/requestUserInput' || message.method === 'mcpServer/elicitation/request'
     if (!supported) { this.server?.reject(message.id, `Unsupported client request: ${message.method}`); return }
-    if (!this.busy || this.cancellation !== undefined || this.failure !== undefined) {
+    if (!this.busy || this.cancellation !== undefined || this.failure !== undefined || this.permissionBoundary) {
       this.respondCancelled(message)
       return
     }
@@ -713,21 +800,22 @@ export class CodexSession {
     this.requests.push({ message, key })
     this.changes.notify()
   }
-  private async answer(pending: PendingRequest, callId: string, ask: AskFn, signal: AbortSignal): Promise<void> {
+  private async answer(pending: PendingRequest, callId: string, ask: AskFn, outerSignal: AbortSignal): Promise<void> {
+    const signal = AbortSignal.any([outerSignal, this.permissionAbort.signal])
     const { message, key } = pending
     let result: unknown
     let failed = false
     try {
       if (message.method === 'item/tool/requestUserInput') {
         const questions = toDshQuestions(message.params)
-        const answer = questions.length ? await this.deps.askQuestion(questions, signal) : undefined
+        const answer = questions.length ? await untilAborted(this.deps.askQuestion(questions, signal), signal) : undefined
         result = toCodexAnswers(answer)
         failed = answer === undefined
       } else if (message.method === 'mcpServer/elicitation/request') {
-        result = await answerElicitation(message.params, this.deps.askQuestion, signal)
+        result = await untilAborted(answerElicitation(message.params, this.deps.askQuestion, signal), signal)
         failed = record(result).action !== 'accept'
       } else {
-        const outcome = await ask({ reason: permissionReason(message), ...(key === callId ? { callId } : {}) }, signal)
+        const outcome = await untilAborted(ask({ reason: permissionReason(message), ...(key === callId ? { callId } : {}) }, signal), signal)
         result = permissionResult(message, signal.aborted ? 'cancelled' : outcome)
         failed = outcome !== 'allowed-once'
       }

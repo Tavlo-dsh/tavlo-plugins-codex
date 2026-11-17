@@ -71,3 +71,13 @@ export function abortReason(signal: AbortSignal): Error {
   error.name = 'AbortError'
   return error
 }
+
+/** Stop waiting even if a third-party callback ignores cancellation. */
+export function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = (): void => reject(abortReason(signal))
+    if (signal.aborted) abort()
+    else signal.addEventListener('abort', abort, { once: true })
+    void promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+  })
+}

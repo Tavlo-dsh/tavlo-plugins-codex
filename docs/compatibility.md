@@ -19,7 +19,7 @@
 | 图片输出 | imageGeneration 的 savedPath／直接结果，imageView 的绝对路径，部分结果仅有 fileId | 可读本地文件或直接 base64 导入宿主附件；等待存储完成再结束工具；fileId-only 明确无法下载 |
 | 工具进度 | command outputDelta、MCP progress、patchUpdated、turn/diff | 有界尾部和消息数、100ms 合并写入，最终聚合输出替换增量；命令与投影可查，原有终端卡尚未接投影更新 |
 | 执行中追加 | `turn/steer.expectedTurnId`、`clientUserMessageId` | 显式命令立即追加，普通输入排队；成功直接记用户消息，不再入队；明确拒绝可重试，传输不明不重放 |
-| 权限 | DSH 预设与派生 custom、sandboxPolicy 实际配置、approval override | 支持只读／工作区可写／完整访问、额外可写目录及 never；custom 按实际完整访问 + never 判断直接放行，其他组合保留审批策略；Auto 依赖宿主工具审查，原生工具无法覆盖，明确拒绝 |
+| 权限 | DSH 预设与派生 custom、sandboxPolicy 实际配置、approval override；`thread/settings/update` 仅影响后续回合，0.169.0 的 `turn/settings/update` 不接受 sandboxPolicy／approvalPolicy | 支持只读／工作区可写／完整访问、额外可写目录及 never；运行中变更取消旧审批并中断原生回合，然后按最新权限在同一线程接续，不重发原始输入；空闲只更新设置。停止／设置失败则终止进程。Auto 仍明确拒绝 |
 | 诊断 | 全局 warning/configWarning、MCP 启动、account/read、额度、Windows readiness、失败回合 | 保存有界诊断；自定义 provider 未要求 OpenAI 认证时不误报未登录；不持久账户邮箱或完整配置 |
 | 界面入口 | DSH `0.2.2-rc.1` 的 `conversation.input.right`／`conversation.composer.dock`、共享 Toast、`remote.commands.execute` 与会话投影 | 模型选择器左侧的独立闪电 Fast 开关及输入框底部的原生统计；均读取原生会话投影。Fast 检查真实命令结果，运行中／无写权限／模型切换中禁用。其他控制保留 `/codex` 入口，Plan、Goal、子代理图形面板待接入 |
 | 底栏统计 | `tavloCodex.usage`；`turn/completed.turn.durationMs`、`startedAt`、`completedAt` | 消耗与缓存取累计增量，上下文取最近调用快照。均速使用同一回合的已观测输出 / 原生总耗时，含工具和等待，不表示纯生成速率。耗时按 `durationMs` → 起止时间 → 插件观测墙钟依次回退；完成后无 `turnId` 的晚到用量仍可配对，缺失计时的旧记录显示待更新 |
@@ -32,8 +32,9 @@
 | --- | --- |
 | 自动测试 | 真实 DSH 插件日志与投影、工具 schema/render、可控 App Server、原生控制和故障恢复；详细数字见进度记录 |
 | 本机协议 | Windows、codex-cli 0.169.0：初始化、9 模型、线程、Fast 切换及权限保持、Plan、名称、暂停 Goal、预算保留用量与清除；独立临时 CODEX_HOME，0 模型回合 |
-| Fast 客户端 | 18 文件 135 项测试、类型检查与构建通过；隔离浏览器加载客户端产物，验证默认／开启／禁用、等待服务端更新、失败提示和 360px 布局不溢出。预览使用宿主控件源码与模拟命令服务，尚未在用户运行中的 DSH 做完整集成验收 |
-| 底栏统计客户端 | 全量 19 文件 152 项测试通过；覆盖三项详情卡片、耗时回退、turn id 晚确认、晚到无 `turnId` 用量和零输出不发布速度；隔离浏览器验证浅色／深色主题控件和 360px 布局。该预览使用构建产物、模拟投影和宿主控件源码，不等同于用户 DSH 集成验收 |
+| 运行中权限 | 本机 Codex 0.169.0 + loopback 模拟 Responses 服务，5 个真实原生回合验证只读→完整访问→只读、已出现审批的取消及续接；原生 turn_context 权限逐项一致，同一线程、原始输入各提交一次，0 付费模型调用。全量 164 项测试与类型检查通过；用户于 2026-11-17 确认实机验证成功 |
+| Fast 客户端 | 18 文件 135 项测试、类型检查与构建通过；隔离浏览器加载客户端产物，验证默认／开启／禁用、等待服务端更新、失败提示和 360px 布局不溢出。预览使用宿主控件源码与模拟命令服务；用户于 2026-11-17 另行明确确认 Fast 开关实机验证通过 |
+| 底栏统计客户端 | 全量 19 文件 152 项测试通过；覆盖三项详情卡片、耗时回退、turn id 晚确认、晚到无 `turnId` 用量和零输出不发布速度；隔离浏览器验证浅色／深色主题控件和 360px 布局。用户于 2026-11-17 另行明确确认统计底栏实机验证通过 |
 | 真实 DSH | DSH 0.2.2-rc.1，独立 DSH_HOME，已登录本机 Codex，只读 + never：收到 CODEX_DSH_OK，正常完成；日志保存统计、上下文容量、原生边界和诊断，子进程退出 |
 | 待验收 | 完整图形交互、真实图片／工具／审批／恢复／分叉／Plan；Goal 跨回合与重启、子代理并发订阅与停止；真实进程故障与重启；旧 CLI 版本 |
 

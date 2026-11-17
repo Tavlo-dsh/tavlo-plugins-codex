@@ -71,6 +71,8 @@ sequenceDiagram
 
 原生沙箱策略在每次提交新回合时从 DSH 的 sandboxPolicy 与 approval 服务读取，支持预设以及派生的 custom 组合和额外可写目录。DSH Auto 依赖宿主工具审查，无法覆盖 Codex 自行执行的工具，因此明确拒绝该预设。审批由 `ctx.approval` 执行；实际配置为完整访问且 never 的预设或 custom 组合可直接放行。仅使用 `accept`，不采用 `acceptForSession` 或持久规则建议。额外权限申请使用 `scope: turn`。
 
+`SessionRegistry` 监听 `permission/preset`、`sandbox/mode` 和 `approval/policy`，在微任务中合并同次选择产生的事件，避免在 session append 观察器内递归写投影。`CodexSession.refreshPermissions()` 串行应用最新设置；原生 0.169.0 的活动回合设置接口不支持沙箱和审批策略，故运行中先取消旧请求并 `turn/interrupt`，等终态、已知子代理停止与 Goal 边界处理完成，再 `thread/settings/update` 和 `turn/start` 接续同一线程。接续只发送权限变化说明，不重发原始消息，保留已完成工具结果及输入去重记录。用户停止、卸载或原生任务自然完成时不续跑；停止超时、配置拒绝或不明确提交失败会关闭进程并暴露错误。空闲时仅更新线程设置，不发起模型回合。
+
 通常审批附着在对应工具的等待期间。没有可镜像 item 的提问或审批会创建一条合成工具记录，保证 DSH 有步骤可以处理交互。子代理请求来自同一受管 app-server，可以由父工具等待期间处理；不错误地把父工具 callId 附给子代理请求。
 
 取消会清空尚未提交的输入、停止处理晚到的输出、取消问题与审批，随后发送 `turn/interrupt`。在 `turn/start` 应答之前发生取消时，获得 turn id 后再发中断。新输入要等中断完成；超过宽限时间则杀掉进程。启动握手期间取消会直接关闭连接。

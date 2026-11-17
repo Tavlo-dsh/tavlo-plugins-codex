@@ -29,9 +29,13 @@ class FakeServer implements AppServer {
   goalState: Record<string, unknown> | null = null
   childTurns = new Map<string, unknown[]>()
   onSteer?: () => Promise<unknown>
+  onInterrupt?: (params: Record<string, unknown>) => Promise<unknown>
+  onSettings?: (params: Record<string, unknown>) => Promise<unknown>
   constructor(readonly handlers: ServerHandlers) {}
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
     this.calls.push({ method, params })
+    if (method === 'turn/interrupt' && this.onInterrupt) return this.onInterrupt(params)
+    if (method === 'thread/settings/update' && this.onSettings) return this.onSettings(params)
     if (method === 'thread/read' && this.childTurns.has(String(params.threadId))) return { thread: { id: params.threadId, parentThreadId: 'thread', status: { type: 'active' } } }
     if (method === 'thread/turns/list') return { data: this.childTurns.get(String(params.threadId)) ?? [] }
     if (method === 'turn/steer') return this.onSteer ? this.onSteer() : { turnId: params.expectedTurnId }
@@ -145,6 +149,202 @@ describe('native Codex conversation', () => {
     await vi.waitFor(() => expect(server().counter).toBe(2))
     expect(server().calls.filter(c => c.method === 'turn/start').at(-1)?.params).toMatchObject(policy)
     server().end(); await second
+  })
+
+  it.each([
+    [{ approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite' } }, { approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } }],
+    [{ approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } }, { approvalPolicy: 'on-request', sandboxPolicy: { type: 'readOnly', networkAccess: false } }],
+  ])('interrupts and continues an active turn with changed permissions (%j)', async (before, after) => {
+    let policy = before
+    const { session, server } = setup({ policy: () => policy })
+    const stream = collect(session.stream(options()))
+    await started(server)
+    server().emit('item/agentMessage/delta', { itemId: 'm', delta: 'before ' })
+    server().onInterrupt = async () => { server().end('interrupted'); return {} }
+    policy = after
+    await session.refreshPermissions()
+    expect(server().counter).toBe(2)
+    const calls = server().calls.filter(c => ['turn/start', 'turn/interrupt', 'thread/settings/update'].includes(c.method))
+    expect(calls.map(c => c.method)).toEqual(['turn/start', 'turn/interrupt', 'thread/settings/update', 'turn/start'])
+    expect(calls[2]?.params).toMatchObject({ threadId: 'thread', ...after })
+    expect(calls[3]?.params).toMatchObject({ threadId: 'thread', ...after, model: 'configured-model', effort: 'medium' })
+    expect(JSON.stringify(calls[3]?.params.input)).not.toContain('hello')
+    expect(session.sentMessageIds).toEqual(new Set(['u1']))
+    server().emit('item/agentMessage/delta', { itemId: 'late', delta: 'stale', turnId: 'turn1' })
+    server().emit('item/agentMessage/delta', { itemId: 'm2', delta: 'after' })
+    server().end()
+    const chunks = await stream
+    expect(chunks.filter(c => c.type === 'text-delta').map(c => c.text).join('')).toBe('before after')
+    expect(chunks.filter(c => c.type === 'finish')).toEqual([expect.objectContaining({ reason: { kind: 'stop' } })])
+  })
+
+  it('cancels an already displayed approval and keeps completed mirror outcomes across continuation', async () => {
+    let fullAccess = false
+    const { session, server } = setup({ policy: () => ({ approvalPolicy: fullAccess ? 'never' : 'on-request', sandboxPolicy: { type: fullAccess ? 'dangerFullAccess' : 'workspaceWrite' } }) })
+    const first = collect(session.stream(options()))
+    await started(server)
+    server().item('completed', { type: 'commandExecution', id: 'done', command: 'completed', aggregatedOutput: 'kept', exitCode: 0 })
+    await first
+    server().ask('item/commandExecution/requestApproval', 'pending', { command: 'pending' })
+    const next = collect(session.stream(options([])))
+    await next
+    let lateAnswer!: (answer: 'allowed-once') => void
+    const ask = vi.fn<AskFn>(() => new Promise(resolve => { lateAnswer = resolve }))
+    const waiting = session.waitForTool('thread:pending', ask, new AbortController().signal)
+    await vi.waitFor(() => expect(ask).toHaveBeenCalledOnce())
+    server().onInterrupt = async () => { server().end('interrupted'); return {} }
+    fullAccess = true
+    await session.refreshPermissions()
+    expect(ask.mock.calls[0]?.[1].aborted).toBe(true)
+    expect((await waiting).isError).toBe(true)
+    lateAnswer('allowed-once')
+    expect(await session.waitForTool('thread:done', vi.fn(), new AbortController().signal)).toEqual({ text: 'kept', isError: false })
+    await Promise.resolve()
+    expect(server().answers).toEqual([{ id: 'req-0', result: { decision: 'cancel' } }])
+    server().end()
+  })
+
+  it('uses the latest selection made while an interrupt is pending, without duplicate continuation', async () => {
+    let type = 'workspaceWrite'
+    const { session, server } = setup({ policy: () => ({ sandboxPolicy: { type }, approvalPolicy: 'never' }) })
+    const stream = collect(session.stream(options()))
+    await started(server)
+    type = 'dangerFullAccess'
+    const first = session.refreshPermissions()
+    await vi.waitFor(() => expect(server().calls.some(c => c.method === 'turn/interrupt')).toBe(true))
+    type = 'readOnly'
+    const second = session.refreshPermissions()
+    server().end('interrupted')
+    await Promise.all([first, second])
+    expect(server().counter).toBe(2)
+    expect(server().calls.filter(c => c.method === 'turn/start').at(-1)?.params).toMatchObject({ sandboxPolicy: { type: 'readOnly' } })
+    expect(server().calls.filter(c => c.method === 'turn/interrupt')).toHaveLength(1)
+    server().end(); await stream
+  })
+
+  it('does not restart after user cancellation during a permission change', async () => {
+    let policy = {}
+    const { session, server } = setup({ policy: () => policy })
+    const controller = new AbortController()
+    const stream = collect(session.stream(options(undefined, { signal: controller.signal })))
+    await started(server)
+    policy = { approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } }
+    const changed = session.refreshPermissions()
+    await vi.waitFor(() => expect(server().calls.some(c => c.method === 'turn/interrupt')).toBe(true))
+    controller.abort()
+    server().end('interrupted')
+    await changed
+    expect((await stream).at(-1)).toMatchObject({ reason: { kind: 'aborted' } })
+    expect(server().counter).toBe(1)
+  })
+
+  it('does not continue a turn that naturally completed while permission update was stopping it', async () => {
+    let policy = {}
+    const { session, server } = setup({ policy: () => policy })
+    const stream = collect(session.stream(options()))
+    await started(server)
+    server().onInterrupt = async () => { server().end(); throw new RpcError(-32600, 'no active turn to interrupt') }
+    policy = { approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } }
+    await session.refreshPermissions()
+    expect((await stream).at(-1)).toMatchObject({ reason: { kind: 'stop' } })
+    expect(server().counter).toBe(1)
+  })
+
+  it.each(['settings rejected', 'interrupt timeout'])('stops the process when permission synchronization fails: %s', async failure => {
+    let policy = {}
+    const { session, server } = setup({ policy: () => policy, cancelGraceMs: 50 })
+    const stream = collect(session.stream(options()))
+    const rejected = expect(stream).rejects.toThrow('权限同步失败')
+    await started(server)
+    if (failure === 'settings rejected') {
+      server().onInterrupt = async () => { server().end('interrupted'); return {} }
+      server().onSettings = async () => { throw new RpcError(-32602, 'unsupported permissions') }
+    }
+    policy = { approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } }
+    await expect(session.refreshPermissions()).rejects.toThrow('权限同步失败')
+    await rejected
+    expect(server().closed).toBe(true)
+    expect(server().counter).toBe(1)
+  })
+
+  it('coalesces preset knob events and does not initialize or revive disposed sessions', async () => {
+    const { session, server } = setup()
+    const refresh = vi.spyOn(session, 'refreshPermissions').mockResolvedValue()
+    const agent = { session: { header: { cwd: '/workspace' } } } as Agent
+    const createSession = vi.fn(() => session)
+    const registry = new SessionRegistry({ getAgent: () => agent, ask: vi.fn(), warn: vi.fn(), createSession })
+    registry.observeEvent('dsh', { type: 'sandbox/mode' })
+    expect(createSession).not.toHaveBeenCalled()
+    registry.resolveSession('dsh')
+    for (const type of ['permission/preset', 'sandbox/mode', 'approval/policy']) registry.observeEvent('dsh', { type })
+    await Promise.resolve()
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(server()).toBeUndefined()
+    registry.observeEvent('dsh', { type: 'sandbox/mode' })
+    await registry.disposeAll()
+    expect(refresh).toHaveBeenCalledOnce()
+  })
+
+  it('updates an idle thread without generating another model turn and ignores unchanged permissions', async () => {
+    let policy = {}
+    const { session, server } = setup({ policy: () => policy })
+    const stream = collect(session.stream(options()))
+    await started(server); server().end(); await stream
+    await session.refreshPermissions()
+    expect(server().calls.some(c => c.method === 'thread/settings/update')).toBe(false)
+    policy = { approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } }
+    await session.refreshPermissions()
+    expect(server().calls.filter(c => c.method === 'thread/settings/update')).toHaveLength(1)
+    expect(server().counter).toBe(1)
+    expect(server().calls.some(c => c.method === 'turn/interrupt')).toBe(false)
+  })
+
+  it('waits for a pending turn/start identity before interrupting and continuing', async () => {
+    let policy = {}
+    const { session, server } = setup({ policy: () => policy, cancelGraceMs: 1000 })
+    const first = collect(session.stream(options()))
+    await started(server); server().end(); await first
+    let accept!: (value: unknown) => void
+    server().onStart = () => { server().counter++; return new Promise(resolve => { accept = resolve }) }
+    const next = collect(session.stream(options([user('u2')])))
+    await vi.waitFor(() => expect(server().counter).toBe(2))
+    policy = { approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } }
+    const changed = session.refreshPermissions()
+    await Promise.resolve(); await Promise.resolve()
+    expect(server().calls.some(c => c.method === 'turn/interrupt')).toBe(false)
+    server().onStart = undefined
+    server().onInterrupt = async () => { server().end('interrupted'); return {} }
+    accept({ turn: { id: 'turn2' } })
+    await changed
+    expect(server().counter).toBe(3)
+    expect(server().calls.find(c => c.method === 'turn/interrupt')?.params.turnId).toBe('turn2')
+    server().end(); await next
+    expect(session.sentMessageIds).toEqual(new Set(['u1', 'u2']))
+  })
+
+  it('waits for known child turns to stop before continuing under narrower permissions', async () => {
+    let type = 'dangerFullAccess'
+    const state = initialNativeState()
+    state.agents.child = { threadId: 'child', parentThreadId: 'thread', status: 'running' }
+    const { session, server } = setup({ nativeState: state, policy: () => ({ approvalPolicy: 'never', sandboxPolicy: { type } }), cancelGraceMs: 1000 })
+    const stream = collect(session.stream(options()))
+    await started(server)
+    server().childTurns.set('child', [{ id: 'child-turn', status: 'inProgress' }])
+    let stopChild!: () => void
+    server().onInterrupt = async params => {
+      if (params.threadId === 'thread') { server().end('interrupted'); return {} }
+      await new Promise<void>(resolve => { stopChild = resolve })
+      return {}
+    }
+    type = 'readOnly'
+    const changed = session.refreshPermissions()
+    await vi.waitFor(() => expect(stopChild).toBeTypeOf('function'))
+    expect(server().counter).toBe(1)
+    server().childTurns.set('child', [])
+    stopChild()
+    await changed
+    expect(server().counter).toBe(2)
+    server().end(); await stream
   })
   it.each([undefined, 'provider_approved_dsh'])(
     'uses the configured Codex client identity (%s) in the real session handshake', async clientName => {
