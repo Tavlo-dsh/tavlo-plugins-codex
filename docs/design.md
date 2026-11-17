@@ -1,6 +1,6 @@
 # Codex 接入设计
 
-开发与验收按 [开发计划](implementation-plan.md) 推进；阶段状态与验证记录见 [开发进度](progress.md)。以下描述当前后端、命令、模型选择器左侧的闪电 Fast 开关及输入栏底部统计实现，其余图形面板仍待接入。
+开发与验收按 [开发计划](implementation-plan.md) 推进；阶段状态与验证记录见 [开发进度](progress.md)。客户端保留 Fast 开关和原生统计；Plan、工具进度、Goal 和子代理沿用命令入口。
 
 ## 接入点
 
@@ -103,16 +103,22 @@ Fast 使用同一会话控制锁，通过 `thread/settings/update.serviceTier` �
 
 Goal 修改前读取权威状态。只有显式 set 传 objective，并初始保存为 paused；状态与预算修改保留已有用量。用户操作使用 origin=user，回合边界暂停使用 automatic。resume 只驱动一个受管 DSH 回合，结束自动暂停；turn/completed 不代表 goal complete。未受管续跑立即中断，暂停失败关闭进程。预算耗尽不能自动解除，增加预算也不自动恢复。
 
+正常释放会话先在有界时间内暂停目标、停止后代，再关闭进程。异常退出保留最后观测状态并注明连接结束，恢复时重新读取原生 Goal、保留预算与用量并暂停遗留 active 状态。边界暂停只作用于当前仍 active 的目标，不覆盖已经 complete、blocked 或受限的状态。活动目标拒绝再次 resume；恢复命令无法提交受管回合时撤回活动执行。Fork 清除父目标快照后读取新线程实际目标。
+
+用户确认不需要额外的 Plan／工具进度／Goal／子代理面板，因此不注册 `conversation.input.dock`。相关状态继续保存在原生投影中，通过 `/codex` 命令查询和操作；现有 Fast 开关与统计底栏保留。
+
 ## 子代理、图片与执行状态
 
-代理派发完全由 Codex 完成。`collabAgentToolCall`、`subAgentActivity` 和已知子线程事件汇入稳定代理表；模型请求不能覆盖原生实际解析模型，旧调用完成不能回退已更新状态。详情读取 thread 元数据及最近三轮历史，控制前验证已知身份、父级与活跃回合。不为获取事件而恢复子线程；父边界请求中断已观测的活跃代理，进程断开标记 connectionLost。真实并发订阅、父子停止与重启仍需验收。
+代理派发完全由 Codex 完成。`collabAgentToolCall`、`subAgentActivity` 和已知子线程事件汇入稳定代理表。`NativeLifecycle` 在活动期间每秒通过 `thread/list.ancestorThreadId` 有界分页发现后代，按父子关系消解无序结果，再以 `thread/read` 和最近三轮历史核对状态；最多 256 个后代，拒绝重复 cursor 或身份变化。读取期间收到的新事件优先于旧快照。不调用子线程 resume，因此不会为订阅重新激活已卸载线程。
+
+父边界先读取后代，向活动回合发 interrupt，并持续核对直到无活动回合；只有 RPC 应答不足以宣告停止。尚在启动的线程等待 turn id，迟到启动的子代理也会被停止。`cancelGraceMs` 到期或核对失败关闭整个受管进程。断线清空活动 turn id 并标记 connectionLost；恢复重新读取状态，不复活子任务。审批仍沿实际 thread/item 归属处理。
 
 图片输入前读取模型 inputModalities；未知模型保守支持 text。可读绝对路径或直接 base64 图片结果导入 DSH 附件库，有格式与大小限制；仅有 fileId 时显示无法下载。原生 turn 先结束也等待附件存储完成，避免丢失图片工具结果。
 
-工具进度保留 64 KiB 尾部、最多 128 工具和每个 MCP 工具 32 条进度消息，100ms 合并写入插件日志；最终输出替换增量。图片引用、进度、turn diff 与诊断进入持久状态，命令可查询，图形面板消费 `tavloCodex` 投影。诊断保留配置警告、MCP 启动、认证、额度、Windows 沙箱与回合错误，不保存账户邮箱或完整配置。
+工具进度保留 64 KiB 尾部、最多 128 工具和每个 MCP 工具 32 条进度消息，100ms 合并写入插件日志；最终输出替换增量。图片引用、进度、turn diff 与诊断进入持久状态，命令可查询。诊断保留配置警告、MCP 启动、认证、额度、Windows 沙箱与回合错误，不保存账户邮箱或完整配置。
 
 ## 验证范围
 
 自动测试验证 JSONL 分片、乱序应答、RPC 拒绝、断开与超时，以及会话去重、进程替换、工具续读、审批、用户问题、恢复／分叉、用量与投影重放、Plan、Goal、代理、图片、进度、诊断和 DSH 真实 LLM runtime 的辅助路由。`scripts/smoke.mjs` 使用隔离临时 Codex home 验证模型、线程、Plan、名称和暂停 Goal，不提交模型请求。
 
-协议字段依据 `codex-cli 0.167.2` 的稳定与实验 `generate-ts` 输出，并参照[官方接口文档](https://learn.chatgpt.com/docs/app-server)。真实 DSH headless 验收使用独立 DSH_HOME、已登录本机 Codex、只读和 never 审批，已返回 CODEX_DSH_OK 并正常结束；日志保存原生 replayState、统计、容量和诊断，进程无残留。完整图形交互、真实 Goal 跨回合和子代理生命周期仍待验收。
+协议字段已核对 `codex-cli 0.169.0` 的实验类型，并参照[官方接口文档](https://learn.chatgpt.com/docs/app-server)。真实 DSH headless 文字回合、真实 Codex Goal 跨回合和子代理停止／重启均有验证记录，见 [本轮验证](workspace-verification.md)。此前通过浏览器验收的四项工作面板已按用户反馈撤下。其余图片、恢复／分叉的完整界面组合与旧 CLI 兼容仍单独跟踪。

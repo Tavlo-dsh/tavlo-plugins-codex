@@ -107,6 +107,25 @@ describe('native thread controls', () => {
     controls.restoreMode({ mode: 'plan' })
     expect(state().mode.selected).toBe('default')
   })
+  it.each(['complete', 'blocked', 'budgetLimited', 'usageLimited'])('does not replace a %s Goal with paused at a boundary', async status => {
+    const f = setup()
+    f.request.mockResolvedValue({ goal: { threadId: 'thread', objective: 'work', status, tokensUsed: 500, tokenBudget: 500, timeUsedSeconds: 12, createdAt: 1, updatedAt: 2 } })
+    await f.controls.changeGoal('pause', undefined, 'automatic')
+    expect(f.request.mock.calls.map(([method]) => method)).toEqual(['thread/goal/get'])
+    expect(f.state().goal?.status).toBe(status)
+  })
+  it('rejects a second resume and clears a recovered read error without resetting usage', async () => {
+    const f = setup()
+    const goal = { threadId: 'thread', objective: 'work', status: 'active', tokensUsed: 500, tokenBudget: 1000, timeUsedSeconds: 12, createdAt: 1, updatedAt: 2 }
+    f.controls.observeGoal(goal)
+    f.request.mockRejectedValueOnce(new Error('temporary failure'))
+    await expect(f.controls.getGoal()).rejects.toThrow('temporary failure')
+    f.request.mockResolvedValue({ goal })
+    await expect(f.controls.changeGoal('resume')).rejects.toThrow('已启用')
+    expect(f.state().goalControl.error).toBeUndefined()
+    expect(f.state().goal?.tokensUsed).toBe(500)
+    expect(f.request.mock.calls.every(([method]) => method === 'thread/goal/get')).toBe(true)
+  })
 })
 
 describe('Fast commands', () => {

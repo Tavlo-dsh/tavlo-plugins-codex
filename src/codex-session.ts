@@ -24,6 +24,7 @@ import { UsageTracker } from './usage-tracker.ts'
 import { NativeControls, collaborationMode } from './native-controls.ts'
 import type { Mode } from './native-controls.ts'
 import { NativeAgents, runningAgent } from './native-agents.ts'
+import { NativeLifecycle } from './native-lifecycle.ts'
 import { importNativeImage } from './native-images.ts'
 import type { NativeImageStore } from './native-images.ts'
 import { boundedOutput, NativeProgress } from './native-progress.ts'
@@ -125,6 +126,8 @@ export class CodexSession {
   private goalBoundary: Promise<void> = Promise.resolve()
   private childrenBoundary: Promise<void> = Promise.resolve()
   private readonly agents: NativeAgents
+  private readonly lifecycle: NativeLifecycle
+  private lifecycleTimer: ReturnType<typeof setTimeout> | undefined
   private modelsReady: Promise<void> = Promise.resolve()
   private nativeModels: readonly ModelInfo[] = []
   private readonly progress: NativeProgress
@@ -149,6 +152,8 @@ export class CodexSession {
       request: (method, params) => this.server!.request(method, { ...params, threadId: this.threadId }),
     })
     this.agents = new NativeAgents(() => this.nativeState, agents => this.updateState({ agents }))
+    this.lifecycle = new NativeLifecycle({ state: () => this.nativeState, agents: this.agents, signal: this.lifetime.signal,
+      request: (method, params) => this.server!.request(method, params) })
     this.progress = new NativeProgress(() => this.nativeState, (patch, final) => final ? this.updateState(patch) : this.deferState(patch))
     this.diagnostics = new NativeDiagnostics(() => this.nativeState, diagnostics => this.updateState({ diagnostics }))
     this.now = deps.now ?? Date.now
@@ -306,32 +311,38 @@ export class CodexSession {
     if (text(metadata.id) !== id || (metadata.parentThreadId && metadata.parentThreadId !== known.parentThreadId)) throw new Error('子代理身份／父会话不一致。')
     const result = record(await this.server!.request('thread/turns/list', { threadId: id, limit: 3, sortDirection: 'desc', itemsView: 'full' }))
     const turns = Array.isArray(result.data) ? result.data : []
-    const active = turns.map(record).find(t => t.status === 'inProgress')
-    const status = text(record(metadata.status).type) || known.status
-    this.updateState({ agents: { ...this.nativeState.agents, [id]: { ...known, status, ...(active ? { activeTurnId: text(active.id) } : {}),
-      ...(text(metadata.model) ? { model: text(metadata.model) } : {}),
-      ...(text(metadata.reasoningEffort) ? { reasoningEffort: text(metadata.reasoningEffort) } : {}),
-    } } })
+    this.agents.snapshot(metadata, turns)
     return { turns }
   }
   private stopChildren(): void {
-    if (!this.server || this.failure !== undefined) return
+    if (!this.server || !this.threadId || this.failure !== undefined) return
     this.childrenBoundary = this.childrenBoundary.then(async () => {
-      for (const agent of Object.values(this.nativeState.agents).filter(runningAgent)) {
-        const { turns } = await this.readAgent(agent.threadId)
-        const active = turns.map(record).find(t => t.status === 'inProgress')
-        if (!active) continue
-        await this.server!.request('turn/interrupt', { threadId: agent.threadId, turnId: active.id })
-        this.updateState({ agents: { ...this.nativeState.agents, [agent.threadId]: { ...this.nativeState.agents[agent.threadId]!, interruptRequested: true } } })
-      }
+      const deadline = AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(this.deps.cancelGraceMs)])
+      await untilAborted(this.lifecycle.stop(deadline), deadline)
     })
     void this.childrenBoundary.catch(error => this.die(new Error(`Codex 子代理边界中断失败：${String(error)}`)))
+  }
+  private observeLifecycle(): void {
+    if (this.lifecycleTimer || this.failure || !this.threadId) return
+    this.lifecycleTimer = setTimeout(() => {
+      this.lifecycleTimer = undefined
+      if (this.failure || (!this.busy && !Object.values(this.nativeState.agents).some(runningAgent))) return
+      void this.lifecycle.refresh().then(() => {
+        if (!this.failure) this.diagnostics.remove('agents-sync')
+      }).catch(error => {
+        if (!this.failure) this.diagnostics.set({ id: 'agents-sync', kind: 'agents', severity: 'warning', message: '子代理状态同步失败，将重试。', details: String(error).slice(0, 2000) })
+      }).finally(() => { if (!this.failure) this.observeLifecycle() })
+    }, 1000)
+    this.lifecycleTimer.unref()
   }
   private pauseGoalAtBoundary(): void {
     if (this.nativeState.goal?.status !== 'active') return
     this.goalBoundary = this.goalBoundary.then(async () => {
-      const goal = await this.controls.getGoal()
-      if (goal?.status === 'active') await this.controls.changeGoal('pause', undefined, 'automatic')
+      const deadline = AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(this.deps.cancelGraceMs)])
+      await untilAborted((async () => {
+        const goal = await this.controls.getGoal()
+        if (goal?.status === 'active') await this.controls.changeGoal('pause', undefined, 'automatic')
+      })(), deadline)
     })
     void this.goalBoundary.catch(error => this.die(new Error(`Codex 目标边界暂停失败，已停止进程防止失管续跑：${String(error)}`)))
   }
@@ -340,6 +351,7 @@ export class CodexSession {
     this.controlling = true
     try {
       await this.ensureInitialized(request, request.signal ?? NEVER)
+      await Promise.all([this.goalBoundary, this.childrenBoundary])
       request.signal?.throwIfAborted()
       this.throwIfDead()
       return await action()
@@ -452,6 +464,12 @@ export class CodexSession {
     this.changes.notify()
   }
   async dispose(reason?: string): Promise<void> {
+    if (!this.failure && this.threadId) {
+      this.pauseGoalAtBoundary()
+      this.stopChildren()
+      const deadline = AbortSignal.timeout(this.deps.cancelGraceMs)
+      await untilAborted(Promise.all([this.goalBoundary, this.childrenBoundary]), deadline).catch(error => this.deps.warn(`Codex 关闭前状态核对失败：${String(error)}`))
+    }
     this.die(new LlmError(reason ?? 'Codex 会话已关闭。', 'CODEX_STOPPED'))
     await this.server?.close()
   }
@@ -507,15 +525,23 @@ export class CodexSession {
       } else if (fork || this.nativeState.threadId !== resume.codexSessionId) this.usageTracker.rebaseUnknown()
       if (fork) {
         const { diff: _inheritedDiff, ...state } = this.nativeState
-        this.nativeState = { ...state, agents: {}, tools: {} }
+        this.nativeState = { ...state, agents: {}, tools: {}, goal: null }
       }
       this.nativeState = { ...this.nativeState, threadId: this.threadId, dshSessionId: this.deps.dshSessionId, usage: this.usageTracker.snapshot, compaction: { status: 'idle' } }
       this.defaultModel = text(response.model) || undefined
       if (this.defaultModel) this.deps.onDefaultModel?.(this.defaultModel)
       this.defaultEffort = text(response.reasoningEffort) || null
       this.controls.restoreSpeed(response.serviceTier)
-      await this.controls.getGoal().catch(error => this.deps.warn(`Codex goal state unavailable: ${String(error)}`))
+      await this.controls.getGoal().catch(error => {
+        if (this.nativeState.goal) throw error
+        this.deps.warn(`Codex goal state unavailable: ${String(error)}`)
+      })
       if (this.nativeState.goal?.status === 'active') await this.controls.changeGoal('pause', undefined, 'automatic')
+      // Recovery reconciles stored descendants without reopening their processes.
+      if (resume && !fork) {
+        const deadline = AbortSignal.any([signal, AbortSignal.timeout(this.deps.cancelGraceMs)])
+        await untilAborted(this.lifecycle.stop(deadline), deadline)
+      }
       this.controls.restoreMode(response.collaborationMode)
       const nativeName = this.controls.observeName(record(response.thread).name)
       if (nativeName) this.deps.onNativeName?.(nativeName)
@@ -574,6 +600,7 @@ export class CodexSession {
       this.activeRequest = { ...request, messages: [], currentTurnMessageIds: new Set() }
       this.appliedPolicy = JSON.stringify(policy)
       this.busy = true
+      this.observeLifecycle()
       this.turnId = undefined
       this.turnStartedAt = undefined
       this.appliedModel = request.model
@@ -628,7 +655,11 @@ export class CodexSession {
     if (this.failure !== undefined) return
     this.diagnostics.notification({ method, params: p })
     if (this.busy && this.cancellation === undefined && !(typeof p.turnId === 'string' && p.threadId === this.threadId && this.turnId && p.turnId !== this.turnId)) this.progress.notification({ method, params: p })
-    if (this.agents.notification({ method, params: p })) return
+    if (this.agents.notification({ method, params: p })) {
+      if (!this.busy && !this.controlling && Object.values(this.nativeState.agents).some(runningAgent)) this.stopChildren()
+      else this.observeLifecycle()
+      return
+    }
     if (p.threadId !== this.threadId) return
     if (method === 'thread/settings/updated') {
       this.controls.restoreSpeed(record(p.threadSettings).serviceTier)
@@ -642,6 +673,7 @@ export class CodexSession {
     if (method === 'thread/goal/updated' || method === 'thread/goal/cleared') {
       try { this.controls.observeGoal(method.endsWith('/cleared') ? null : p.goal) }
       catch (error) { this.deps.warn(String(error)) }
+      if (!this.busy && !this.controlling) this.pauseGoalAtBoundary()
       return
     }
     if (method === 'turn/started') {
@@ -852,6 +884,10 @@ export class CodexSession {
     if (this.failure !== undefined) return
     this.failure = error
     this.busy = false
+    clearTimeout(this.lifecycleTimer); this.lifecycleTimer = undefined
+    if (this.nativeState.goal?.status === 'active') {
+      this.nativeState = { ...this.nativeState, goalControl: { ...this.nativeState.goalControl, error: '连接已结束；恢复时将重新读取并暂停原生目标。' } }
+    }
     try { this.progress.stop('connectionLost') } catch { /* session disposed */ }
     try { this.agents.disconnected() } catch { /* the DSH session may already be disposed */ }
     if (['requested', 'running'].includes(this.nativeState.compaction.status)) {

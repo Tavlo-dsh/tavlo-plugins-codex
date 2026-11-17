@@ -6,13 +6,14 @@ export const MAX_TOOL_OUTPUT = 64 * 1024
 export function boundedOutput(value: string): { text: string; truncated: boolean } {
   return { text: value.slice(-MAX_TOOL_OUTPUT), truncated: value.length > MAX_TOOL_OUTPUT }
 }
-const done = new Set(['completed', 'failed', 'interrupted', 'declined'])
+const done = new Set(['completed', 'failed', 'interrupted', 'declined', 'connectionLost'])
 export class NativeProgress {
   constructor(private readonly state: () => NativeState, private readonly update: (patch: Partial<NativeState>, final: boolean) => void) {}
   notification({ method, params: p }: RpcNotification): void {
     const threadId = text(p.threadId), turnId = text(p.turnId), itemId = text(p.itemId)
     if (threadId !== this.state().threadId && !this.state().agents[threadId]) return
     if (method === 'turn/diff/updated') {
+      if (threadId !== this.state().threadId) return
       const output = boundedOutput(text(p.diff))
       this.update({ diff: { turnId, ...output } }, false)
       return

@@ -80,9 +80,10 @@ export class NativeControls {
     }
     const parsed = goalSchema.safeParse(raw)
     if (!parsed.success) throw new Error('Codex 返回的目标状态格式无效。')
+    if (this.deps.state().threadId && parsed.data.threadId !== this.deps.state().threadId) throw new Error('Codex 目标所属线程不一致。')
     const previous = this.deps.state().goal
     if (previous && previous.updatedAt > parsed.data.updatedAt) return
-    if (previous && JSON.stringify(previous) === JSON.stringify(parsed.data)) return
+    if (previous && JSON.stringify(previous) === JSON.stringify(parsed.data) && !this.deps.state().goalControl.error) return
     this.deps.update({ goal: parsed.data, goalControl: { capability: 'supported', continuation: 'bounded' } })
   }
   private goalError(error: unknown): void {
@@ -108,6 +109,8 @@ export class NativeControls {
   async changeGoal(action: 'pause' | 'resume' | 'clear' | 'budget', budget?: number | null, origin: 'user' | 'automatic' = 'user'): Promise<void> {
     const current = await this.getGoal()
     if (!current) throw new Error('当前没有原生目标。')
+    if (action === 'pause' && current.status !== 'active') return
+    if (action === 'resume' && current.status === 'active') throw new Error('此目标已启用，请等待当前任务结束。')
     if (action === 'resume' && (current.status === 'usageLimited' || current.status === 'budgetLimited' && current.tokenBudget !== null && current.tokensUsed >= current.tokenBudget)) throw new Error('原生目标已达到用量／预算限制；不能自动解除限制。')
     if (action === 'resume' && current.status === 'complete') throw new Error('此目标已完成；请显式设置新目标。')
     if (action === 'budget' && budget !== null && (typeof budget !== 'number' || !Number.isSafeInteger(budget) || budget < 1)) throw new Error('预算需为正整数或 none。')

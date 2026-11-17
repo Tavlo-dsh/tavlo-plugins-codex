@@ -2,13 +2,39 @@ import type { NativeAgent, NativeState } from './native-state.ts'
 import type { NativeItem, RpcNotification } from './protocol.ts'
 import { record, text } from './protocol.ts'
 
-const terminal = new Set(['completed', 'errored', 'shutdown', 'notFound', 'interrupted'])
+const terminal = new Set(['completed', 'failed', 'errored', 'shutdown', 'notFound', 'interrupted', 'systemError'])
 export const runningAgent = (agent: NativeAgent): boolean => !terminal.has(agent.status) && !['idle', 'notLoaded', 'connectionLost'].includes(agent.status)
 
 /** Native Codex owns dispatch; this reducer only keeps observable identities and relationships. */
 export class NativeAgents {
   private readonly completedCalls = new Set<string>()
   constructor(private readonly state: () => NativeState, private readonly update: (agents: NativeState['agents']) => void) {}
+  interruptRequested(id: string): void {
+    const agent = this.state().agents[id]
+    if (agent) this.patch(id, agent.parentThreadId, { interruptRequested: true })
+  }
+  snapshot(metadata: Record<string, unknown>, turns: unknown[]): void {
+    const id = text(metadata.id), known = this.state().agents[id]
+    if (!known) return
+    const loaded = record(metadata.status).type !== 'notLoaded'
+    const recent = turns.map(record), active = loaded ? recent.find(turn => turn.status === 'inProgress') : undefined
+    const last = recent[0]
+    const status = active ? 'running' : record(metadata.status).type === 'active' ? 'pendingInit'
+      : last && last.status !== 'inProgress' ? text(last.status) : loaded ? 'idle' : 'connectionLost'
+    const messages = recent.flatMap(turn => (Array.isArray(turn.items) ? turn.items : []).map(record))
+      .filter(item => item.type === 'agentMessage').map(item => text(item.text)).filter(Boolean)
+    this.patch(id, known.parentThreadId, {
+      status, activeTurnId: active ? text(active.id) : '',
+      ...(messages.length ? { message: messages.join('\n').slice(-32000) } : {}),
+      ...(text(metadata.model) ? { model: text(metadata.model) } : {}),
+      ...(text(metadata.reasoningEffort) ? { reasoningEffort: text(metadata.reasoningEffort) } : {}),
+    }, true)
+    // Recent history can contain a spawn missed during a connection interruption.
+    for (const turn of [...recent].reverse()) for (const raw of Array.isArray(turn.items) ? turn.items : []) {
+      const item = record(raw)
+      if (text(item.id)) this.item(item as NativeItem, id, turn.status !== 'inProgress')
+    }
+  }
   private patch(id: string, parent: string, changes: Partial<NativeAgent>, canRestart = false): void {
     if (!id || id === this.state().threadId || !parent) return
     const previous = this.state().agents[id]
@@ -16,6 +42,7 @@ export class NativeAgents {
     const patch = { ...changes }
     if (previous && terminal.has(previous.status) && patch.status && !terminal.has(patch.status) && !canRestart) delete patch.status
     const next = { ...previous, threadId: id, parentThreadId: parent, status: previous?.status ?? 'pendingInit', ...patch }
+    if (terminal.has(next.status) || ['idle', 'notLoaded', 'connectionLost'].includes(next.status)) next.activeTurnId = ''
     if (JSON.stringify(next) === JSON.stringify(previous)) return
     this.update({ ...this.state().agents, [id]: next })
   }
@@ -57,6 +84,7 @@ export class NativeAgents {
       if (parent !== root && !this.state().agents[parent]) return false
       this.patch(text(thread.id), parent, {
         status: text(record(thread.status).type) || 'pendingInit',
+        ...(text(thread.preview) ? { task: text(thread.preview).slice(0, 16000) } : {}),
         ...(text(thread.model) ? { model: text(thread.model) } : {}),
         ...(text(thread.reasoningEffort) ? { reasoningEffort: text(thread.reasoningEffort) } : {}),
       })
@@ -75,12 +103,13 @@ export class NativeAgents {
         this.patch(id, known.parentThreadId, { status: text(turn.status) === 'failed' ? 'errored' : text(turn.status), activeTurnId: '' })
       }
       if (method === 'thread/status/changed') this.patch(id, known.parentThreadId, { status: text(record(params.status).type) || known.status })
+      if (method === 'thread/closed') this.patch(id, known.parentThreadId, { status: 'connectionLost', activeTurnId: '' })
       return true
     }
     return false
   }
   disconnected(): void {
-    const agents = Object.fromEntries(Object.entries(this.state().agents).map(([id, agent]) => [id, runningAgent(agent) ? { ...agent, status: 'connectionLost' } : agent]))
+    const agents = Object.fromEntries(Object.entries(this.state().agents).map(([id, agent]) => [id, runningAgent(agent) ? { ...agent, status: 'connectionLost', activeTurnId: '' } : agent]))
     if (JSON.stringify(agents) !== JSON.stringify(this.state().agents)) this.update(agents)
   }
 }

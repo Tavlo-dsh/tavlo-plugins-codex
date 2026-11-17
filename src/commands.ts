@@ -90,8 +90,13 @@ export function codexCommand(deps: CommandDeps): CommandDefinition {
           else await session.goal(op as 'get' | 'resume' | 'pause' | 'clear', request)
           if (op === 'pause' || op === 'clear') agent.cancel({ kind: 'user' })
           if (op === 'resume') {
-            signal.throwIfAborted()
-            agent.followup(createUserMessage({ content: [{ type: 'text', text: '请继续执行已启用的原生目标，本轮结束后暂停等待我确认继续。' }], source: { kind: 'user' } }))
+            try {
+              signal.throwIfAborted()
+              agent.followup(createUserMessage({ content: [{ type: 'text', text: '请继续执行已启用的原生目标，本轮结束后暂停等待我确认继续。' }], source: { kind: 'user' } }))
+            } catch (error) {
+              session.abandonTurn()
+              throw error
+            }
           }
           const goal = session.state.goal
           return { kind: 'success', text: goal ? `Goal: ${goal.status}; ${goal.tokensUsed}/${goal.tokenBudget ?? 'unlimited'} tokens; ${goal.timeUsedSeconds}s.\n${goal.objective}\nDSH 回合边界自动暂停；/codex goal resume 显式继续。` : '原生目标已清除。' }

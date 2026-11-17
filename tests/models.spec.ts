@@ -2,13 +2,22 @@ import { describe, expect, it, vi } from 'vitest'
 import { fetchCodexModels, ModelCatalog } from '../src/models.ts'
 import { CodexAdapter } from '../src/adapter.ts'
 
+// These tests exercise discovery and catalog updates, not disk persistence.
+// Keep asynchronous cache writes from leaving files behind after the worker exits.
+vi.mock('node:fs/promises', async importOriginal => ({
+  ...await importOriginal<typeof import('node:fs/promises')>(),
+  mkdir: vi.fn().mockResolvedValue(undefined),
+  writeFile: vi.fn().mockResolvedValue(undefined),
+  rename: vi.fn().mockResolvedValue(undefined),
+}))
+
 describe('Codex model discovery', () => {
   it('loads every native model page without starting a thread and refreshes the provider catalog', async () => {
     const request = vi.fn(async (_method: string, params: Record<string, unknown>) => params.cursor === 'page-2'
       ? { data: [{ model: 'gpt-next', displayName: 'GPT Next', description: 'Latest', inputModalities: ['text', 'image'], supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }], nextCursor: null }
       : { data: [{ model: 'gpt-main', displayName: 'GPT Main', description: 'Default model', inputModalities: ['text'] }], nextCursor: 'page-2' })
     const updated = vi.fn()
-    const catalog = new ModelCatalog('codex', 'unused-model-cache', updated, vi.fn())
+    const catalog = new ModelCatalog('codex', 'models-test.json', updated, vi.fn())
 
     catalog.update(await fetchCodexModels({ request }))
 
@@ -29,7 +38,7 @@ describe('Codex model discovery', () => {
   })
 
   it('waits for discovery before returning the first uncached provider catalog', async () => {
-    const catalog = new ModelCatalog('codex', 'unused-model-cache', vi.fn(), vi.fn())
+    const catalog = new ModelCatalog('codex', 'models-test.json', vi.fn(), vi.fn())
     const ensureModels = vi.fn(async () => catalog.update([
       { model: 'gpt-native', displayName: 'GPT Native', description: '', supportedReasoningEfforts: [] },
     ]))

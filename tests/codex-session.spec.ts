@@ -28,6 +28,7 @@ class FakeServer implements AppServer {
   counter = 0
   goalState: Record<string, unknown> | null = null
   childTurns = new Map<string, unknown[]>()
+  childParents = new Map<string, string>()
   onSteer?: () => Promise<unknown>
   onInterrupt?: (params: Record<string, unknown>) => Promise<unknown>
   onSettings?: (params: Record<string, unknown>) => Promise<unknown>
@@ -35,8 +36,13 @@ class FakeServer implements AppServer {
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
     this.calls.push({ method, params })
     if (method === 'turn/interrupt' && this.onInterrupt) return this.onInterrupt(params)
+    if (method === 'turn/interrupt' && params.threadId !== 'thread') {
+      this.childTurns.set(String(params.threadId), [{ id: params.turnId, status: 'interrupted' }])
+      return {}
+    }
     if (method === 'thread/settings/update' && this.onSettings) return this.onSettings(params)
-    if (method === 'thread/read' && this.childTurns.has(String(params.threadId))) return { thread: { id: params.threadId, parentThreadId: 'thread', status: { type: 'active' } } }
+    if (method === 'thread/list') return { data: [], nextCursor: null }
+    if (method === 'thread/read') return { thread: { id: params.threadId, parentThreadId: this.childParents.get(String(params.threadId)) ?? 'thread', status: { type: this.childTurns.has(String(params.threadId)) ? this.childTurns.get(String(params.threadId))!.some(turn => record(turn).status === 'inProgress') ? 'active' : 'idle' : 'notLoaded' } } }
     if (method === 'thread/turns/list') return { data: this.childTurns.get(String(params.threadId)) ?? [] }
     if (method === 'turn/steer') return this.onSteer ? this.onSteer() : { turnId: params.expectedTurnId }
     if (method === 'thread/goal/get') return { goal: this.goalState }
@@ -76,7 +82,7 @@ function setup(overrides: Partial<CodexSessionDeps> = {}): { session: CodexSessi
   const deps: CodexSessionDeps = {
     dshSessionId: 'dsh', cwd: '/workspace', provider: 'codex', sentMessageIds: new Set(), after: Promise.resolve(), cancelGraceMs: 100,
     nativeState: initialNativeState(), publishNativeState: vi.fn(),
-    startServer: handlers => (server = new FakeServer(handlers)), policy: () => ({}), readImage: async () => new Uint8Array([1, 2]),
+    startServer: handlers => { server = new FakeServer(handlers); for (const agent of Object.values(deps.nativeState.agents)) server.childParents.set(agent.threadId, agent.parentThreadId); return server }, policy: () => ({}), readImage: async () => new Uint8Array([1, 2]),
     onModels: vi.fn(), onContextWindow: vi.fn(), askQuestion: vi.fn(async () => undefined), warn: vi.fn(), ...overrides,
   }
   const session = new CodexSession(deps); sessions.push(session)
@@ -468,6 +474,34 @@ describe('native Codex conversation', () => {
     await vi.waitFor(() => expect(server().calls.some(c => c.method === 'turn/interrupt' && c.params.turnId === 'unmanaged-continuation')).toBe(true))
     await session.goal('clear', options([]))
     expect(session.state.goal).toBeNull()
+  })
+  it('closes the process when a child acknowledges interruption but never stops', async () => {
+    const { session, server } = setup({ cancelGraceMs: 80 })
+    const stream = collect(session.stream(options())); await started(server)
+    server().childTurns.set('child', [{ id: 'child-turn', status: 'inProgress' }])
+    server().emit('thread/started', { thread: { id: 'child', parentThreadId: 'thread', status: { type: 'active' } } })
+    server().onInterrupt = async () => ({})
+    server().end()
+    await expect(stream).rejects.toThrow()
+    expect(server().closed).toBe(true)
+    expect(session.state.agents.child?.status).toBe('connectionLost')
+  })
+  it('stops a late-starting child after its parent has already completed', async () => {
+    const { session, server } = setup({ cancelGraceMs: 1000 })
+    const stream = collect(session.stream(options())); await started(server)
+    server().end(); await stream
+    server().childTurns.set('child', [{ id: 'child-turn', status: 'inProgress' }])
+    server().emit('thread/started', { thread: { id: 'child', parentThreadId: 'thread', status: { type: 'active' } } })
+    await vi.waitFor(() => expect(session.state.agents.child?.status).toBe('interrupted'))
+    expect(server().counter).toBe(1)
+  })
+  it('pauses an active Goal before gracefully disposing its process', async () => {
+    const { session, server } = setup()
+    await session.goal('set', options([]), 'finish work')
+    await session.goal('resume', options([]))
+    await session.dispose()
+    expect(server().goalState?.status).toBe('paused')
+    expect(server().closed).toBe(true)
   })
   it('uses the final revised Plan body and retains structured step state', async () => {
     const { session, server } = setup()

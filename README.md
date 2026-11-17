@@ -53,13 +53,15 @@ dsh plugin --profile web add "$(pwd)"
 | 停止 | 图片准备阶段取消不提交消息；原生回合开始后调用 `turn/interrupt`，超过 `cancelGraceMs` 仍未完成则终止进程。插件停止或会话释放时由 DSH 回收子进程。 |
 | 输入去重 | 只提交当前 DSH 回合里尚未发送的用户／日程消息。明确的模型／参数拒绝可重试；传输断开后不自动重放可能已执行的消息。 |
 | 上下文与用量 | 输入框下方显示累计 token、缓存命中率、最近回合平均速度和上下文占用。`total` 水位差分记录消耗，`last` 保存最近调用快照，容量来自 `modelContextWindow`。读取 `tavloCodex.usage`，不向宿主标准 usage 写入混用两个口径的数据。 |
-| Plan 与名称 | Plan / Default 独立于权限；结构化步骤与方案正文分别保存。确认执行先切回 Default，再提交确认。人工会话名称优先，原生自动名称不会覆盖人工修改。 |
+| Plan 与名称 | 通过 `/codex plan/default/execute/keep` 切换模式和确认计划，`/codex usage` 查询步骤与正文。确认执行先切回 Default，再提交确认；模式独立于权限。人工会话名称优先。 |
 | Fast | 点击模型选择器左侧的**闪电开关**，或使用 `/codex fast on` 开启、`off` 关闭、`status` 查询。会话选择覆盖插件 `fastMode` 默认值；均未设置时沿用原生 Codex 配置。选择持久化，在新建、恢复、分叉与后续回合传递，不改动模型、推理强度或权限。 |
-| Goal | 仅显式创建，初始暂停；修改状态／预算先读取原生目标，保留已用量。resume 执行一个 DSH 回合，回合边界自动暂停，等待再次确认继续。 |
-| 子代理 | Codex 原生派发，插件保存父子关系与状态，提供列表、历史详情、已知活跃回合的追加消息与中断。 |
-| 图片与进度 | 图片输入按原生模型能力校验；可访问的图片结果存入 DSH 附件库。命令输出、MCP progress、补丁与 diff 写入持久投影，最终输出替换临时增量。 |
+| Goal | `/codex goal` 设置目标、预算、继续一轮、暂停和清除。仅显式创建，初始暂停；状态／预算调整保留已用量。回合结束与正常卸载时暂停，异常重启先读取并暂停遗留活动目标；已完成或受限状态不会被边界暂停覆盖。 |
+| 子代理 | `/codex agents/agent` 查询关系、状态和结果，`agent-message/agent-interrupt` 发送补充指令或停止。原生事件结合每秒只读后代查询补齐状态，不为观察而恢复子线程；父边界等待真实停止终态，超时关闭进程。 |
+| 图片与进度 | 图片输入按原生模型能力校验；可访问的图片结果存入 DSH 附件库。「工具进度」实时显示命令输出、MCP 消息、补丁与 diff，最终输出替换临时增量；输出跟随末尾，用户上翻后保留阅读位置。 |
 
 ## 原生操作入口
+
+输入框保持原有布局，Plan、工具进度、Goal 与子代理通过下方 `/codex` 命令操作和查询。未完成的 Plan 草稿不能执行；模式切换、执行计划和恢复 Goal 需等待当前任务结束。Goal 采用每轮暂停、显式继续的方式。
 
 选择 Codex 模型后，模型选择器左侧会显示独立的**闪电开关**，不会覆盖或占用模型按钮。闪电点亮表示 Fast 开启，描边表示关闭；点击即可为当前会话切换，后续回合使用该选择。切换中和任务运行中禁用；原生接口拒绝时显示错误并保留原设置。尚未读取原生默认值时，无障碍状态与提示会说明正在继承默认值，不把未知状态当成已确认关闭。此入口使用 DSH `0.2.2-rc.1` 已发布的输入栏扩展位，无需修改宿主。
 
@@ -87,7 +89,7 @@ dsh plugin --profile web add "$(pwd)"
 
 Fast 通常消耗更多额度，模型服务商仍需支持该档位；原生接口拒绝切换时会显示错误并保留此前选择。图形开关和 `/codex fast on/off` 共用插件命令入口，不会把 `/fast` 当作普通提示词发给模型。
 
-统一 UI 可消费 `tavloCodex` 投影中的 `usage`、`compaction`、`mode`、`speed`、`plan`、`name`、`goal`、`goalControl`、`agents`、`tools`、`diff`、`steering` 和 `diagnostics`。`speed` 保存会话选择（`inherit`／`fast`／`standard`）、原生 `effectiveTier` 和设置错误；`fastModeDefault` 仅在客户端视图中提供插件默认值，不写入会话历史。闪电 Fast 开关与底栏统计已接入，Plan、Goal、子代理等面板仍待接入；具体约束见 [兼容矩阵](docs/compatibility.md)。
+客户端可消费 `tavloCodex` 投影中的 `usage`、`compaction`、`mode`、`speed`、`plan`、`name`、`goal`、`goalControl`、`agents`、`tools`、`diff`、`steering` 和 `diagnostics`。`speed` 保存会话选择（`inherit`／`fast`／`standard`）、原生 `effectiveTier` 和设置错误；`fastModeDefault` 仅在客户端视图中提供插件默认值，不写入会话历史。客户端提供闪电 Fast 开关与底栏统计，四项独立工作面板已按用户反馈撤下；具体约束见 [兼容矩阵](docs/compatibility.md)。
 
 ## 配置
 
@@ -148,12 +150,12 @@ Fast 通常消耗更多额度，模型服务商仍需支持该档位；原生接
 ## 限制
 
 - 这是服务端接入，保留 Codex 的原生工具和指令。DSH 的 system prompt、工具定义及历史编辑不会重新注入 Codex 原生记录。
-- 权限选择的沙箱映射在新原生回合开始时生效；回合中切换权限不会回溯修改正在运行的原生沙箱。已经发出的审批请求会读取当前 DSH 选择。
+- 权限选择的沙箱映射在新原生回合开始时生效；回合中切换权限会取消旧审批、中断旧回合，再按最新设置接续同一线程。已经执行的外部操作不会撤销。
 - DSH Auto 审查预设依赖宿主工具执行链；Codex 原生工具不经过该链，因此暂不支持。请使用明确的沙箱和审批组合。
 - DSH 内置 token-meter 共用单次 usage 统计消耗与上下文，不能准确表示原生多次模型调用。Codex 权威统计使用独立投影；未知旧线程恢复／分叉首通知只计最近调用，标记 `inferred`，此前未观测调用可能少计。
-- Goal 采用每个 DSH 回合结束自动暂停的有界策略，暂不支持无人干预的连续循环。
-- 子代理内部的文本与工具事件不逐条进入主聊天；详情按需读取，不为订阅而恢复子线程。可中断已观测的活跃子代理；并发订阅、父子停止和重启场景尚未支持。审批保留实际请求者身份。
-- 图片输出支持可读的本地路径及直接 base64 结果。只有 `fileId` 的输出没有受支持的下载接口，会显示限制；图形界面尚未提供图片预览与实时工具进度。
+- 当前 `/codex goal` 控制 Codex 原生 Goal，每个 DSH 回合结束自动暂停；尚未与 DSH 自带目标模式及目标栏联动，也未开放无人干预的连续循环。
+- 子代理内部的文本与工具事件不逐条进入主聊天；事件与只读查询保存关系、状态和摘要，可通过命令查看，不为订阅而恢复子线程。父回合结束等待子代理停止，恢复时重新核对状态；不提供子代理内部逐 token 输出。审批保留实际请求者身份。
+- 图片输出支持可读的本地路径及直接 base64 结果。只有 `fileId` 的输出没有受支持的下载接口，会显示限制；图片完整交互仍待真实验收。工具增量保存到投影，使用 `/codex progress` 查询。
 - 文件卡片展示 Codex 报告的补丁片段，不代表完整文件快照。没有在工具开始事件中提供的内容仍可在原始结果里查看。
 - 进程崩溃后可恢复原生线程历史，但不会自动重放状态不明的请求；需要用户发送下一条消息。辅助路由不可用时由 DSH 使用兜底标题。
 - 当前没有实现原生登录 UI、插件管理 UI、复杂 MCP 表单及 app-server 动态工具执行。请先在终端配置好 Codex；未支持的客户端请求会收到明确的 JSON-RPC 错误。
@@ -166,11 +168,12 @@ pnpm test
 pnpm build
 pnpm test:local
 pnpm test:local:permissions
+pnpm test:local:lifecycle
 pnpm pack
 ```
 
 `test:local:permissions` 使用本机 Codex、独立临时配置和 loopback 模拟模型，验证运行中提升／收紧权限与取消待审批请求，不使用用户凭据或付费模型服务。切换权限会中断当时的命令；已产生的外部效果不会回滚，接续指令要求先核对不确定结果。停止超时或新权限被拒绝时，插件结束原生进程并报告错误。已有 DSH 进程需重新加载本插件才能使用更新后的 Host 代码。
 
-设计说明见 [docs/design.md](docs/design.md)，权限行为与验证见 [docs/permissions-verification.md](docs/permissions-verification.md)。
+设计说明见 [docs/design.md](docs/design.md)，权限行为与验证见 [docs/permissions-verification.md](docs/permissions-verification.md)，生命周期验证与界面调整见 [docs/workspace-verification.md](docs/workspace-verification.md)。
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)。

@@ -33,6 +33,7 @@
     "docs/implementation-plan.md",
     "docs/progress.md",
     "docs/permissions-verification.md",
+    "docs/workspace-verification.md",
     "docs/compatibility.md",
     "CHANGELOG.md",
     "README.md"
@@ -50,6 +51,7 @@
     "test": "vitest run",
     "test:local": "pnpm build && node scripts/smoke.mjs",
     "test:local:permissions": "pnpm build && node scripts/verify-live-permissions.mjs",
+    "test:local:lifecycle": "pnpm build && node scripts/verify-live-lifecycle.mjs",
     "prepack": "pnpm build"
   },
   "engines": {
