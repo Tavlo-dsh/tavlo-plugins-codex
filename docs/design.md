@@ -1,6 +1,6 @@
 # Codex 接入设计
 
-开发与验收按 [开发计划](implementation-plan.md) 推进；阶段状态与验证记录见 [开发进度](progress.md)。以下描述当前后端与命令实现，图形面板仍待统一 UI 接入。
+开发与验收按 [开发计划](implementation-plan.md) 推进；阶段状态与验证记录见 [开发进度](progress.md)。以下描述当前后端、命令、模型选择器左侧的闪电 Fast 开关及输入栏底部统计实现，其余图形面板仍待接入。
 
 ## 接入点
 
@@ -69,7 +69,7 @@ sequenceDiagram
 
 ## 审批和取消
 
-原生沙箱策略在每次提交新回合时从 DSH 的 sandboxPolicy 与 approval 服务读取，支持预设以及派生的 custom 组合和额外可写目录。DSH Auto 依赖宿主工具审查，无法覆盖 Codex 自行执行的工具，因此明确拒绝该预设。审批由 `ctx.approval` 执行；完整访问且 never 的受支持预设可直接放行。仅使用 `accept`，不采用 `acceptForSession` 或持久规则建议。额外权限申请使用 `scope: turn`。
+原生沙箱策略在每次提交新回合时从 DSH 的 sandboxPolicy 与 approval 服务读取，支持预设以及派生的 custom 组合和额外可写目录。DSH Auto 依赖宿主工具审查，无法覆盖 Codex 自行执行的工具，因此明确拒绝该预设。审批由 `ctx.approval` 执行；实际配置为完整访问且 never 的预设或 custom 组合可直接放行。仅使用 `accept`，不采用 `acceptForSession` 或持久规则建议。额外权限申请使用 `scope: turn`。
 
 通常审批附着在对应工具的等待期间。没有可镜像 item 的提问或审批会创建一条合成工具记录，保证 DSH 有步骤可以处理交互。子代理请求来自同一受管 app-server，可以由父工具等待期间处理；不错误地把父工具 callId 附给子代理请求。
 
@@ -90,6 +90,12 @@ DSH 0.2 尚无按 provider 关闭宿主自动压缩的接口，因此 `resolveMo
 ## Plan、名称与 Goal
 
 初始化启用 `experimentalApi`。Plan 使用 `thread/settings/update` 和后续 `turn/start.collaborationMode`，保留模型与推理强度，不改动 sandbox。接口不可用时保存能力错误，不静默切回 Default。步骤来自 `turn/plan/updated`，方案正文来自 plan item，最终正文覆盖草稿；确认执行先切 Default，再生成一次用户确认输入。
+
+Fast 使用同一会话控制锁，通过 `thread/settings/update.serviceTier` 切换（开启为 `fast`，关闭为 `null`）；不会提交模型消息。`speed.selected` 保存会话选择，优先于插件可选 `fastMode` 默认值，二者均未设置时不发送该字段。新建、恢复、分叉与后续回合均应用选择；响应与 `thread/settings/updated` 更新 `speed.effectiveTier`，把当前 CLI 的 `priority`／`default` 归一化为 `fast`／`null`，其他档位保留原值。原生拒绝时保留此前选择并记录错误。旧日志缺少 `speed` 时按继承模式恢复。
+
+客户端通过 `conversation.input.right` 在模型选择器左侧注册独立 Fast 开关；已发布的 DSH `0.2.2-rc.1` 没有菜单内部的扩展位，因此不依赖或覆盖模型按钮。React 与 Toast 由宿主共享，闪电图标使用内联 SVG，`lib/client.js` 按宿主 ModuleLoader 格式独立打包。选择 Codex 的根会话才显示；模型目录用于识别新会话默认模型。点击通过 `remote.commands.execute` 调用现有命令，检查传输错误、未匹配和 handler 错误；不使用丢弃 handler 结果的 `session.command`。开关只随投影视图更新，不乐观回显；运行、提交或模型切换期间禁用，卸载后的应答不污染下一会话。插件默认值只附加在投影视图的 `fastModeDefault` 中，不持久化部署配置。
+
+统计使用 `conversation.composer.dock` 的插件入口，直接读取 `tavloCodex.usage`，弥补停止通用 usage 上报后原有 token-meter 无数据而隐藏的情况。累计消耗使用 `consumed`，缓存分母包含互斥的未缓存输入、缓存读取和缓存写入；上下文分子使用 `last.totalTokens`，不使用累计消耗。切换模型或压缩后不展示旧上下文样本。`usage.lastTurn` 将输出用量与相同 turn id 的原生耗时配对：优先使用 `durationMs`，为空时由原生 `startedAt/completedAt` 的秒差换算，协议都未提供时才使用插件从 `turn/start` 发出到 `turn/completed` 到达的墙钟差。完成后不带 `turnId` 的用量通知绑定到刚完成且仍处于活动身份的回合；只有正输出 token 和正耗时同时存在才发布速度。UI 明确标为包含工具与等待的回合平均速度。未计时旧记录、未知容量或快照显示占位并解释原因，不从 DSH 镜像工具步骤的耗时推测纯生成速度。每项读数点击打开由 CSS Anchor 定位的统计卡片，采用宿主的主题、圆角、阴影和“标题／分隔线／明细”结构，并支持 Escape 与点击外部关闭；提示气泡仅在窄屏截断读数时作为回退。
 
 会话名称通过 `thread/name/set` 与通知同步。DSH 人工标题固定优先，原生自动名称以 provider 来源填充宿主标题；过滤回声，重命名错误与回合错误独立。session observer 内的同步安排在异步边界，避免递归 append。
 

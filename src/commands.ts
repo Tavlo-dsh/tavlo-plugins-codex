@@ -5,18 +5,26 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CodexSession, StepRequest } from './codex-session.ts'
 import type { NativeState } from './native-state.ts'
+import { isFastTier } from './native-controls.ts'
 import { PROVIDER } from './constants.ts'
 
 export interface CommandDeps {
+  fastMode?: boolean
   state(agent: Agent): NativeState
   resolve(agent: Agent): CodexSession
   rename(agent: Agent, title: string): string
 }
-export const COMMAND_USAGE = '/codex [usage|diagnostics|compact|plan|default|execute|keep|name <title>|goal [get|set <objective>|resume|pause|clear|budget <tokens|none>]|agents|agent <id>|agent-interrupt <id>|agent-message <id> <text>|progress [itemId]|steer <text>]'
+export const COMMAND_USAGE = '/codex [usage|fast [on|off|status]|diagnostics|compact|plan|default|execute|keep|name <title>|goal [get|set <objective>|resume|pause|clear|budget <tokens|none>]|agents|agent <id>|agent-interrupt <id>|agent-message <id> <text>|progress [itemId]|steer <text>]'
+function speedStatus(state: NativeState, defaultFastMode?: boolean): string {
+  const speed = state.speed
+  const selected = speed.selected === 'inherit' ? (defaultFastMode === undefined ? '跟随原生配置' : defaultFastMode ? '插件默认开启' : '插件默认关闭') : speed.selected === 'fast' ? '会话开启' : '会话关闭'
+  const effective = speed.effectiveTier === undefined ? '尚未读取原生设置' : isFastTier(speed.effectiveTier) ? '已开启' : speed.effectiveTier === null || speed.effectiveTier === 'default' ? '已关闭（标准速度）' : `原生档位 ${speed.effectiveTier}`
+  return `Fast：${effective}；设置：${selected}。${speed.error ? `\n最近设置失败：${speed.error}` : ''}`
+}
 export function codexCommand(deps: CommandDeps): CommandDefinition {
   return {
     definitionId: CommandDefinitionId('tavlo-plugins-codex/codex'), name: 'codex',
-    description: 'Codex native usage, context, Plan mode and name',
+    description: 'Codex native usage, Fast speed, context, Plan mode and name',
     input: { hint: COMMAND_USAGE },
     handler: async ({ agent, rawInput, signal }) => {
       const input = rawInput.trim(), [action = 'usage'] = input.split(/\s+/, 1)
@@ -30,11 +38,16 @@ export function codexCommand(deps: CommandDeps): CommandDefinition {
           last ? `Latest input: ${last.inputTokens + last.cacheReadTokens + last.cacheWriteTokens}; output: ${last.outputTokens}; cache read/write: ${last.cacheReadTokens}/${last.cacheWriteTokens}.` : 'Native context sample: awaiting refresh.',
           `Context capacity: ${u.contextWindow ?? 'unknown'}; baseline: ${u.baseline ?? 'unknown'}; compaction: ${state.compaction.status}.`,
           `Mode: ${state.mode.selected}; capability: ${state.mode.capability}.`,
+          speedStatus(state, deps.fastMode),
           ...state.plan.text ? [`Plan (${state.plan.final ? 'final' : 'draft'}):\n${state.plan.text}`] : [],
           ...state.plan.steps.map(step => `[${step.status}] ${step.step}`),
         ].join('\n') }
       }
       if (action === 'diagnostics' && !argument) return { kind: 'success', text: state.diagnostics.map(d => `${d.severity}: ${d.message}${d.details ? `\n${d.details}` : ''}`).join('\n\n') || 'No current Codex diagnostics.' }
+      if (action === 'fast') {
+        if (!argument || argument === 'status') return { kind: 'success', text: speedStatus(state, deps.fastMode) }
+        if (argument !== 'on' && argument !== 'off') return { kind: 'error', text: '用法：/codex fast [on|off|status]' }
+      }
       if (action === 'keep') return { kind: 'success', text: '保留当前模式与计划，未提交执行请求。' }
       if (action === 'progress') {
         const tools = Object.values(state.tools).filter(tool => !argument || tool.itemId === argument || `${tool.threadId}:${tool.itemId}` === argument)
@@ -47,6 +60,10 @@ export function codexCommand(deps: CommandDeps): CommandDefinition {
       const activeGoalControl = action === 'goal' && ['', 'get', 'pause', 'clear'].includes(argument)
       if (!['name', 'agent', 'agent-interrupt', 'agent-message', 'steer'].includes(action) && !activeGoalControl && agent.status !== 'idle') return { kind: 'error', text: '请先等待当前 DSH 任务结束。' }
       try {
+        if (action === 'fast') {
+          await deps.resolve(agent).setFast(argument === 'on', request)
+          return { kind: 'success', text: `Codex Fast 已${argument === 'on' ? '开启' : '关闭'}，后续回合生效。${argument === 'on' ? 'Fast 通常消耗更多额度，具体以模型服务商为准。' : ''}` }
+        }
         if (action === 'steer' && argument) {
           if (agent.status === 'idle') return { kind: 'error', text: '当前没有活跃回合，请使用普通输入开始下一轮。' }
           const message = createUserMessage({ content: [{ type: 'text', text: argument }], source: { kind: 'user' } })

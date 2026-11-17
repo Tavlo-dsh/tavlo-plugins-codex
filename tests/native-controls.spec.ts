@@ -13,6 +13,32 @@ function setup() {
   return { controls, request, state: () => state }
 }
 describe('native thread controls', () => {
+  it('enables Fast and explicitly clears it without changing model, reasoning or permissions', async () => {
+    const { controls, request, state } = setup()
+    await controls.setFast(true)
+    expect(request).toHaveBeenLastCalledWith('thread/settings/update', { serviceTier: 'fast' })
+    expect(state().speed).toEqual({ selected: 'fast', effectiveTier: 'fast', capability: 'supported' })
+    await controls.setFast(false)
+    expect(request).toHaveBeenLastCalledWith('thread/settings/update', { serviceTier: null })
+    expect(state().speed).toEqual({ selected: 'standard', effectiveTier: null, capability: 'supported' })
+  })
+  it('keeps the previous speed selection when the native API rejects a change', async () => {
+    const { controls, request, state } = setup()
+    await controls.setFast(true)
+    request.mockRejectedValue(new RpcError(-32601, 'method not found'))
+    await expect(controls.setFast(false)).rejects.toThrow('method not found')
+    expect(state().speed).toMatchObject({ selected: 'fast', effectiveTier: 'fast', capability: 'unavailable' })
+    expect(state().speed.error).toContain('method not found')
+  })
+  it('observes the native tier without replacing an explicit speed choice', async () => {
+    const { controls, state } = setup()
+    controls.restoreSpeed('priority')
+    expect(state().speed).toMatchObject({ selected: 'inherit', effectiveTier: 'fast' })
+    await controls.setFast(false)
+    controls.restoreSpeed('default')
+    controls.restoreSpeed(undefined)
+    expect(state().speed).toMatchObject({ selected: 'standard', effectiveTier: null })
+  })
   it('gets the authoritative Goal before updating status/budget, never resubmitting the objective', async () => {
     const t = setup()
     let goal = { threadId: 'thread', objective: 'old', status: 'paused', tokensUsed: 500, tokenBudget: 1000, timeUsedSeconds: 12, createdAt: 1, updatedAt: 2 }
@@ -80,6 +106,43 @@ describe('native thread controls', () => {
     await controls.setMode('default', 'model', null)
     controls.restoreMode({ mode: 'plan' })
     expect(state().mode.selected).toBe('default')
+  })
+})
+
+describe('Fast commands', () => {
+  function command() {
+    const state = initialNativeState()
+    const agent = { status: 'idle', model: { current: () => ({ provider: 'codex', model: 'model', reasoningEffort: 'high' }) } } as unknown as Agent
+    const setFast = vi.fn(async (_enabled: boolean) => {})
+    const resolve = vi.fn(() => ({ setFast }) as never)
+    const definition = codexCommand({ state: () => state, resolve, rename: () => '', fastMode: true })
+    const invoke = (rawInput: string) => definition.handler({ agent, rawInput, signal: new AbortController().signal, attachments: [] } as unknown as CommandInvocation)
+    return { state, agent, setFast, resolve, invoke }
+  }
+  it('exposes on/off and rejects invalid input without sending model messages', async () => {
+    const t = command()
+    expect(await t.invoke('fast on')).toMatchObject({ kind: 'success', text: expect.stringContaining('已开启') })
+    expect(t.setFast).toHaveBeenLastCalledWith(true, expect.objectContaining({ model: 'model', reasoningEffort: 'high', messages: [] }))
+    expect(await t.invoke('fast off')).toMatchObject({ kind: 'success', text: expect.stringContaining('已关闭') })
+    expect(t.setFast).toHaveBeenLastCalledWith(false, expect.anything())
+    expect(await t.invoke('fast typo')).toMatchObject({ kind: 'error' })
+    expect(t.setFast).toHaveBeenCalledTimes(2)
+  })
+  it('reads status during a running task without starting or mutating a thread', async () => {
+    const t = command()
+    Object.assign(t.agent, { status: 'running' })
+    expect(await t.invoke('fast')).toMatchObject({ kind: 'success', text: expect.stringContaining('插件默认开启') })
+    t.state.speed.effectiveTier = 'fast'
+    expect(await t.invoke('fast status')).toMatchObject({ kind: 'success', text: expect.stringContaining('已开启') })
+    expect(await t.invoke('usage')).toMatchObject({ kind: 'success', text: expect.stringContaining('Fast：已开启') })
+    expect(await t.invoke('fast off')).toMatchObject({ kind: 'error', text: expect.stringContaining('等待') })
+    expect(t.resolve).not.toHaveBeenCalled()
+  })
+  it('reports native failures without claiming the setting was applied', async () => {
+    const t = command()
+    t.setFast.mockRejectedValue(new Error('Fast is unavailable'))
+    expect(await t.invoke('fast on')).toMatchObject({ kind: 'error', text: expect.stringContaining('Fast is unavailable') })
+    expect(t.state.speed.selected).toBe('inherit')
   })
 })
 

@@ -10,7 +10,7 @@ export interface PermissionPresets {
 export interface EffectivePermissions { sandbox: string; approval: string; writableRoots?: readonly string[] }
 export function hasFullAccess(presets: PermissionPresets | undefined, session: Session, effective?: EffectivePermissions): boolean {
   const name = presets?.current(session)
-  if (name === 'auto' || name === 'custom') return false
+  if (name === 'auto' || name === 'custom' && effective === undefined) return false
   const spec: EffectivePermissions | undefined = effective ?? (name === undefined ? undefined : presets?.resolve(name))
   return spec?.sandbox === 'danger-full-access' && spec.approval === 'never'
 }

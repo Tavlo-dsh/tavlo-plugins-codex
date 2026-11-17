@@ -6,7 +6,7 @@
 
 DeepSeek Harness（DSH）插件：通过本机 **`codex app-server`** 把 Codex 注册为模型提供方 `codex`。每个 DSH 会话拥有一个常驻进程和一个原生 Codex thread，使用标准输入／输出上的双向 JSON-RPC 通信。
 
-Codex 自己负责 agent loop、system prompt、工具执行、AGENTS.md、原生配置与登录态、MCP、skills、子代理和自动压缩。DSH 负责展示文本与思考、镜像工具卡片、权限审批和用户提问。插件通过 `/codex` 提供 Plan、名称、Goal、子代理、用量与执行交互入口，并通过 `tavloCodex` 会话投影发布状态，供统一 UI 接入。
+Codex 自己负责 agent loop、system prompt、工具执行、AGENTS.md、原生配置与登录态、MCP、skills、子代理和自动压缩。DSH 负责展示文本与思考、镜像工具卡片、权限审批和用户提问。插件在模型选择器左侧提供 **闪电 Fast 开关**，通过 `/codex` 提供 Fast、Plan、名称、Goal、子代理、用量与执行交互入口，并通过 `tavloCodex` 会话投影发布状态。
 
 接口依据：[官方 Codex App Server 文档](https://learn.chatgpt.com/docs/app-server)。
 
@@ -52,19 +52,26 @@ dsh plugin --profile web add "$(pwd)"
 | MCP elicitation | 支持简单平面表单的字符串、枚举、数字、整数和布尔字段。URL 模式展示链接，等待用户手动完成后确认。复杂表单拒绝，密码字段不通过对话日志收集。 |
 | 停止 | 图片准备阶段取消不提交消息；原生回合开始后调用 `turn/interrupt`，超过 `cancelGraceMs` 仍未完成则终止进程。插件停止或会话释放时由 DSH 回收子进程。 |
 | 输入去重 | 只提交当前 DSH 回合里尚未发送的用户／日程消息。明确的模型／参数拒绝可重试；传输断开后不自动重放可能已执行的消息。 |
-| 上下文与用量 | `total` 水位差分记录消耗，`last` 保存最近调用快照，容量来自 `modelContextWindow`。权威数据在 `tavloCodex.usage` 和 `/codex usage`；不向宿主标准 usage 写入混用两个口径的数据。 |
+| 上下文与用量 | 输入框下方显示累计 token、缓存命中率、最近回合平均速度和上下文占用。`total` 水位差分记录消耗，`last` 保存最近调用快照，容量来自 `modelContextWindow`。读取 `tavloCodex.usage`，不向宿主标准 usage 写入混用两个口径的数据。 |
 | Plan 与名称 | Plan / Default 独立于权限；结构化步骤与方案正文分别保存。确认执行先切回 Default，再提交确认。人工会话名称优先，原生自动名称不会覆盖人工修改。 |
+| Fast | 点击模型选择器左侧的**闪电开关**，或使用 `/codex fast on` 开启、`off` 关闭、`status` 查询。会话选择覆盖插件 `fastMode` 默认值；均未设置时沿用原生 Codex 配置。选择持久化，在新建、恢复、分叉与后续回合传递，不改动模型、推理强度或权限。 |
 | Goal | 仅显式创建，初始暂停；修改状态／预算先读取原生目标，保留已用量。resume 执行一个 DSH 回合，回合边界自动暂停，等待再次确认继续。 |
 | 子代理 | Codex 原生派发，插件保存父子关系与状态，提供列表、历史详情、已知活跃回合的追加消息与中断。 |
 | 图片与进度 | 图片输入按原生模型能力校验；可访问的图片结果存入 DSH 附件库。命令输出、MCP progress、补丁与 diff 写入持久投影，最终输出替换临时增量。 |
 
 ## 原生操作入口
 
-在选择 Codex 模型的 DSH 会话中使用以下命令。设置模式、手动压缩、执行确认和 Goal 恢复需等待当前 DSH 任务结束。
+选择 Codex 模型后，模型选择器左侧会显示独立的**闪电开关**，不会覆盖或占用模型按钮。闪电点亮表示 Fast 开启，描边表示关闭；点击即可为当前会话切换，后续回合使用该选择。切换中和任务运行中禁用；原生接口拒绝时显示错误并保留原设置。尚未读取原生默认值时，无障碍状态与提示会说明正在继承默认值，不把未知状态当成已确认关闭。此入口使用 DSH `0.2.2-rc.1` 已发布的输入栏扩展位，无需修改宿主。
+
+输入框下方按 **轮数／步数 → 均速 → token／缓存命中率 → 上下文占用** 排列。Codex 统计读取持久化的原生数据；点击均速、token／缓存或上下文可打开与宿主统计卡片同类的详情面板，查看口径和精确计数，文字被截断时悬停或键盘聚焦仍可查看完整读数。累计 token 与缓存命中率使用已观测消耗，上下文百分比使用最近一次调用的输入与输出除以原生窗口容量；压缩后等待新快照。**“均速”是最近计时回合的输出 token / 原生回合总耗时，包含工具执行与等待，不是纯生成速率。** 回合耗时优先取 `durationMs`，缺失时依次使用原生 `startedAt/completedAt` 和插件观测到的回合墙钟时间；没有 `turnId` 的晚到用量仍会与刚完成的回合配对。旧日志完全缺少计时时显示 `—`，后续完成回合并收到用量及耗时后更新。缺失容量或快照也显示 `—`，不伪装成 0%。
+
+在选择 Codex 模型的 DSH 会话中使用以下命令。切换 Fast、设置模式、手动压缩、执行确认和 Goal 恢复需等待当前 DSH 任务结束。
 
 | 命令 | 行为 |
 | --- | --- |
-| `/codex` 或 `/codex usage` | 查询消耗、最近上下文样本、容量、模式和计划步骤。 |
+| `/codex` 或 `/codex usage` | 查询消耗、最近上下文样本、容量、Fast、模式和计划步骤。 |
+| `/codex fast on`、`/codex fast off` | 开启或关闭当前会话的 Fast；后续回合使用该选择，恢复／分叉后仍保留。 |
+| `/codex fast` 或 `/codex fast status` | 查询 Fast 的会话设置与最近观测到的原生档位；可在任务执行中查询，不启动原生线程。 |
 | `/codex plan`、`/codex default` | 设置后续消息使用的原生模式；接口不支持时明确报错。 |
 | `/codex execute`、`/codex keep` | 确认执行最终 Plan，或保留当前计划和模式。 |
 | `/codex name <名称>` | 人工命名并同步到原生 thread。 |
@@ -78,7 +85,9 @@ dsh plugin --profile web add "$(pwd)"
 | `/codex steer <消息>` | 立即追加到当前原生回合；普通输入仍排队到下一轮。成功后记录用户消息，不再重复提交。 |
 | `/codex diagnostics` | 查看认证、配置、MCP、额度、Windows 沙箱和原生回合错误。 |
 
-统一 UI 可消费 `tavloCodex` 投影中的 `usage`、`compaction`、`mode`、`plan`、`name`、`goal`、`goalControl`、`agents`、`tools`、`diff`、`steering` 和 `diagnostics`。本项目提供后端与命令入口，图形面板尚未接入；具体约束见 [兼容矩阵](docs/compatibility.md)。
+Fast 通常消耗更多额度，模型服务商仍需支持该档位；原生接口拒绝切换时会显示错误并保留此前选择。图形开关和 `/codex fast on/off` 共用插件命令入口，不会把 `/fast` 当作普通提示词发给模型。
+
+统一 UI 可消费 `tavloCodex` 投影中的 `usage`、`compaction`、`mode`、`speed`、`plan`、`name`、`goal`、`goalControl`、`agents`、`tools`、`diff`、`steering` 和 `diagnostics`。`speed` 保存会话选择（`inherit`／`fast`／`standard`）、原生 `effectiveTier` 和设置错误；`fastModeDefault` 仅在客户端视图中提供插件默认值，不写入会话历史。闪电 Fast 开关与底栏统计已接入，Plan、Goal、子代理等面板仍待接入；具体约束见 [兼容矩阵](docs/compatibility.md)。
 
 ## 配置
 
@@ -90,6 +99,7 @@ dsh plugin --profile web add "$(pwd)"
   config:
     executable: ''
     clientName: codex_dsh
+    # fastMode: true  # 默认开启 Fast；省略则跟随原生配置，false 则使用标准速度
     inheritCredentials: true
     env: {}
     requestTimeoutMs: 60000
@@ -105,6 +115,7 @@ dsh plugin --profile web add "$(pwd)"
 | --- | --- | --- |
 | `executable` | `''` | Codex 可执行文件或 JS 入口的路径；为空则自动查找。显式路径不存在或无法解析时直接报错。 |
 | `clientName` | `codex_dsh` | Codex App Server 的集成名称，会影响上游 `originator` 与 `User-Agent`。供应商要求特定的集成名称时，使用其认可的值；不能保证供应商自动认可这个默认名称。修改后重启 DSH。 |
+| `fastMode` | 未设置 | `true` 默认开启 Fast，`false` 默认使用标准速度；不设置时沿用原生 Codex 配置。会话内 `/codex fast on/off` 的选择优先。修改插件配置后重新加载或重启 DSH。 |
 | `inheritCredentials` | `true` | 传入 DSH 的完整环境变量；设为 false 时使用 DSH 过滤后的环境。此设置不会隔离磁盘上的 Codex 登录态。 |
 | `env` | `{}` | 追加或覆盖 Codex 环境变量，可设置 `CODEX_HOME` 来选择另一份原生配置和登录态。 |
 | `requestTimeoutMs` | `60000` | 单次 JSON-RPC 请求等待应答的上限，不是模型整个回合的执行时限。 |

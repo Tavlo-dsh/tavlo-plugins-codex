@@ -35,9 +35,12 @@ export const nativeStateSchema = z.object({
     consumed: usageSchema, turnConsumed: usageSchema, nativeTotal: usageSchema.optional(), last: usageSchema.optional(),
     baseline: z.enum(['exact', 'inferred', 'reset']).optional(), turnId: z.string().optional(),
     contextWindow: count.positive().optional(), model: z.string().optional(),
+    // A native turn includes model work, tools and waiting; this is not decode-only timing.
+    lastTurn: z.object({ turnId: z.string(), outputTokens: count, durationMs: count.positive() }).optional(),
   }),
   compaction: z.object({ status: z.enum(['idle', 'requested', 'running', 'completed', 'failed']), itemId: z.string().optional() }),
   mode: z.object({ selected: z.enum(['default', 'plan']), explicit: z.boolean(), capability: z.enum(['unknown', 'supported', 'unavailable']), error: z.string().optional() }).default({ selected: 'default', explicit: false, capability: 'unknown' }),
+  speed: z.object({ selected: z.enum(['inherit', 'fast', 'standard']), effectiveTier: z.string().nullable().optional(), capability: z.enum(['unknown', 'supported', 'unavailable']), error: z.string().optional() }).default({ selected: 'inherit', capability: 'unknown' }),
   plan: z.object({ turnId: z.string().optional(), explanation: z.string().optional(), steps: z.array(z.object({ step: z.string(), status: z.enum(['pending', 'inProgress', 'completed']) })), text: z.string(), final: z.boolean() }).default({ steps: [], text: '', final: false }),
   name: z.object({ title: z.string().optional(), nativeTitle: z.string().optional(), pinned: z.boolean(), error: z.string().optional() }).default({ pinned: false }),
   goal: goalSchema.nullable().default(null),
@@ -50,6 +53,8 @@ export const nativeStateSchema = z.object({
   diagnostics: z.array(z.object({ id: z.string(), kind: z.string(), severity: z.enum(['info', 'warning', 'error']), message: z.string(), details: z.string().optional() })).max(100).default([]),
 })
 export type NativeState = z.infer<typeof nativeStateSchema>
+export const nativeViewSchema = nativeStateSchema.extend({ fastModeDefault: z.boolean().optional() })
+export type NativeView = z.infer<typeof nativeViewSchema>
 export const initialNativeState = (): NativeState => nativeStateSchema.parse({ version: 1, usage: { consumed: zeroUsage(), turnConsumed: zeroUsage() }, compaction: { status: 'idle' } })
 export const STATE_RECORD = 'plugin:tavlo-codex/state' as const
 
@@ -57,7 +62,7 @@ declare module '@deepseek-ai/dsh-session/types' {
   interface PluginRecordMap { 'plugin:tavlo-codex/state': NativeState }
 }
 declare module '@deepseek-ai/dsh-session-projection/types' {
-  interface SessionProjectionMap { tavloCodex: NativeState }
+  interface SessionProjectionMap { tavloCodex: NativeView }
 }
 export function foldNativeState(state: NativeState, event: SessionEvent): NativeState {
   const entry = pluginRecordOf(event)
@@ -69,7 +74,14 @@ export function publishNativeState(session: Session, state: NativeState): void {
   appendPluginRecord(session, STATE_RECORD, nativeStateSchema.parse(state))
 }
 export const nativeStateProjection = {
-  key: 'tavloCodex', stateVersion: 7, stateSchema: nativeStateSchema,
+  key: 'tavloCodex', stateVersion: 9, stateSchema: nativeStateSchema,
   init: initialNativeState, apply: foldNativeState,
-  wire: { viewSchema: nativeStateSchema, view: (state: NativeState) => state, summary: false },
+  wire: { viewSchema: nativeViewSchema, view: (state: NativeState): NativeView => state, summary: false },
 } satisfies ProjectionDefinition<'tavloCodex', NativeState>
+
+/** Expose the current plugin default without storing deployment config in session history. */
+export function nativeStateProjectionWithDefaults(fastMode?: boolean): typeof nativeStateProjection {
+  return { ...nativeStateProjection, wire: { ...nativeStateProjection.wire,
+    view: state => ({ ...state, ...(fastMode === undefined ? {} : { fastModeDefault: fastMode }) }),
+  } }
+}

@@ -40,6 +40,16 @@ describe('permissions and protocol mappings', () => {
     expect(presets.resolve).not.toHaveBeenCalled()
     expect(() => nativePolicy({ ...presets, current: () => 'auto' }, session, '/workspace', { sandbox: 'danger-full-access', approval: 'never' })).toThrow('Auto')
   })
+  it('recognizes custom full access from the effective knobs without bypassing restricted or Auto policies', () => {
+    const presets = { current: () => 'custom', resolve: vi.fn(() => { throw new Error('unknown preset') }) }
+    const fullAccess = { sandbox: 'danger-full-access', approval: 'never' }
+    expect(hasFullAccess(presets, session, fullAccess)).toBe(true)
+    expect(hasFullAccess(presets, session, { sandbox: 'workspace-write', approval: 'never' })).toBe(false)
+    expect(hasFullAccess(presets, session, { sandbox: 'danger-full-access', approval: 'ask' })).toBe(false)
+    expect(hasFullAccess(presets, session)).toBe(false)
+    expect(hasFullAccess({ ...presets, current: () => 'auto' }, session, fullAccess)).toBe(false)
+    expect(presets.resolve).not.toHaveBeenCalled()
+  })
   it('maps failed commands and MCP error results to failed mirror calls', () => {
     expect(itemOutcome({ type: 'commandExecution', id: '1', exitCode: 2, aggregatedOutput: 'bad' })).toEqual({ text: 'bad', isError: true })
     expect(itemOutcome({ type: 'mcpToolCall', id: '1', result: { isError: true, content: [{ type: 'text', text: 'denied' }] } })).toEqual({ text: 'denied', isError: true })

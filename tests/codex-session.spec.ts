@@ -41,7 +41,7 @@ class FakeServer implements AppServer {
       this.goalState = { threadId: 'thread', objective: 'goal', status: 'paused', tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, ...this.goalState, ...params, updatedAt: Number(this.goalState?.updatedAt ?? 0) + 1 }
       return { goal: this.goalState }
     }
-    if (method === 'thread/start' || method === 'thread/resume' || method === 'thread/fork') return { thread: { id: method === 'thread/fork' ? 'fork' : 'thread' }, model: 'configured-model', reasoningEffort: 'medium' }
+    if (method === 'thread/start' || method === 'thread/resume' || method === 'thread/fork') return { thread: { id: method === 'thread/fork' ? 'fork' : 'thread' }, model: 'configured-model', reasoningEffort: 'medium', serviceTier: params.serviceTier === 'fast' ? 'priority' : params.serviceTier ?? null }
     if (method === 'account/read') return { account: { type: 'chatgpt' } }
     if (method === 'windowsSandbox/readiness') return { status: 'ready' }
     if (method === 'model/list') return { data: [{ model: 'configured-model', displayName: 'Native', description: '', inputModalities: ['text', 'image'], supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }], nextCursor: null }
@@ -81,6 +81,71 @@ function setup(overrides: Partial<CodexSessionDeps> = {}): { session: CodexSessi
 async function started(server: () => FakeServer): Promise<void> { await vi.waitFor(() => expect(server().counter).toBeGreaterThan(0)) }
 
 describe('native Codex conversation', () => {
+  it.each([undefined, true, false])('applies the Fast default (%s) to thread creation and each turn', async fastMode => {
+    const { session, server } = setup({ fastMode })
+    const stream = collect(session.stream(options()))
+    await started(server)
+    for (const method of ['thread/start', 'turn/start']) {
+      const params = server().calls.find(call => call.method === method)?.params
+      if (fastMode === undefined) expect(params).not.toHaveProperty('serviceTier')
+      else expect(params).toHaveProperty('serviceTier', fastMode ? 'fast' : null)
+    }
+    expect(session.state.speed.effectiveTier).toBe(fastMode ? 'fast' : null)
+    server().end(); await stream
+  })
+  it('switches Fast for subsequent turns without changing selected reasoning or Plan mode', async () => {
+    const { session, server } = setup()
+    await session.setMode('plan', options([]))
+    await session.setFast(true, options([]))
+    expect(server().calls.at(-1)).toEqual({ method: 'thread/settings/update', params: { threadId: 'thread', serviceTier: 'fast' } })
+    const first = collect(session.stream(options()))
+    await started(server)
+    expect(server().calls.find(c => c.method === 'turn/start')?.params).toMatchObject({ serviceTier: 'fast', effort: 'medium', collaborationMode: { mode: 'plan' } })
+    await expect(session.setFast(false, options([]))).rejects.toThrow()
+    server().end(); await first
+    await session.setFast(false, options([]))
+    const second = collect(session.stream(options([user('u2')])))
+    await vi.waitFor(() => expect(server().counter).toBe(2))
+    expect(server().calls.filter(c => c.method === 'turn/start').at(-1)?.params).toMatchObject({ serviceTier: null, effort: 'medium', collaborationMode: { mode: 'plan' } })
+    server().end(); await second
+  })
+  it('updates observed speed from native settings notifications and ignores other threads', async () => {
+    const { session, server } = setup()
+    const stream = collect(session.stream(options()))
+    await started(server)
+    server().emit('thread/settings/updated', { threadSettings: { serviceTier: 'priority' } })
+    expect(session.state.speed).toMatchObject({ selected: 'inherit', effectiveTier: 'fast' })
+    server().emit('thread/settings/updated', { threadId: 'other-thread', threadSettings: { serviceTier: null } })
+    expect(session.state.speed.effectiveTier).toBe('fast')
+    server().end(); await stream
+  })
+  it.each(['resume', 'fork'])('preserves an explicit Fast-off selection on %s even when the plugin default is on', async operation => {
+    const nativeState = initialNativeState()
+    nativeState.speed = { selected: 'standard', effectiveTier: null, capability: 'supported' }
+    const { session, server } = setup({
+      fastMode: true, nativeState,
+      inheritedReplay: { codexSessionId: 'original', codexTurnId: 'previous', dshSessionId: operation === 'resume' ? 'dsh' : 'parent' },
+    })
+    const stream = collect(session.stream(options()))
+    await started(server)
+    expect(server().calls.find(c => c.method === `thread/${operation}`)?.params).toHaveProperty('serviceTier', null)
+    expect(server().calls.find(c => c.method === 'turn/start')?.params).toHaveProperty('serviceTier', null)
+    server().emit('turn/completed', { threadId: operation === 'fork' ? 'fork' : 'thread', turn: { id: 'turn1', status: 'completed' } })
+    await stream
+  })
+  it('refreshes sandbox and approval policy when the host changes permissions between turns', async () => {
+    let policy = { approvalPolicy: 'on-request', approvalsReviewer: 'user', sandboxPolicy: { type: 'workspaceWrite' } }
+    const { session, server } = setup({ policy: () => policy })
+    const first = collect(session.stream(options()))
+    await started(server)
+    expect(server().calls.find(c => c.method === 'thread/start')?.params).toMatchObject({ sandbox: 'workspace-write', approvalPolicy: 'on-request' })
+    server().end(); await first
+    policy = { approvalPolicy: 'never', approvalsReviewer: 'user', sandboxPolicy: { type: 'dangerFullAccess' } }
+    const second = collect(session.stream(options([user('u2')])))
+    await vi.waitFor(() => expect(server().counter).toBe(2))
+    expect(server().calls.filter(c => c.method === 'turn/start').at(-1)?.params).toMatchObject(policy)
+    server().end(); await second
+  })
   it.each([undefined, 'provider_approved_dsh'])(
     'uses the configured Codex client identity (%s) in the real session handshake', async clientName => {
       const { session, server } = setup({ clientName })
@@ -265,6 +330,45 @@ describe('native Codex conversation', () => {
     server().emit('turn/completed', { turn: { id: 'manual-compact', status: 'completed' } })
     expect(session.state.compaction.status).toBe('completed')
     expect((await collect(session.stream(options([])))).at(-1)).toMatchObject({ reason: { kind: 'stop' } })
+  })
+  it('publishes native whole-turn timing and handles a final usage notification after completion', async () => {
+    const { session, server, deps } = setup()
+    const result = collect(session.stream(options())); await started(server)
+    server().emit('turn/completed', { turn: { id: 'turn1', status: 'completed', durationMs: 4000 } })
+    await result
+    server().emit('thread/tokenUsage/updated', { turnId: undefined, tokenUsage: {
+      total: { inputTokens: 100, outputTokens: 80 }, last: { inputTokens: 100, outputTokens: 80 }, modelContextWindow: 200000,
+    } })
+    expect(session.state.usage.lastTurn).toEqual({ turnId: 'turn1', outputTokens: 80, durationMs: 4000 })
+    expect(deps.publishNativeState).toHaveBeenLastCalledWith(expect.objectContaining({
+      usage: expect.objectContaining({ lastTurn: { turnId: 'turn1', outputTokens: 80, durationMs: 4000 } }),
+    }))
+  })
+  it('computes native whole-turn timing from start and completion timestamps', async () => {
+    const { session, server } = setup()
+    const result = collect(session.stream(options())); await started(server)
+    server().emit('thread/tokenUsage/updated', { tokenUsage: {
+      total: { inputTokens: 100, outputTokens: 80 }, last: { inputTokens: 100, outputTokens: 80 }, modelContextWindow: 200000,
+    } })
+    server().emit('turn/completed', { turn: {
+      id: 'turn1', status: 'completed', durationMs: null, startedAt: 1_000, completedAt: 1_004,
+    } })
+    await result
+    expect(session.state.usage.lastTurn).toEqual({ turnId: 'turn1', outputTokens: 80, durationMs: 4000 })
+  })
+  it('uses the observed wall clock only when the native turn omits all timing', async () => {
+    let now = 10_000
+    const { session, server } = setup({ now: () => now })
+    const result = collect(session.stream(options())); await started(server)
+    server().emit('thread/tokenUsage/updated', { tokenUsage: {
+      total: { inputTokens: 100, outputTokens: 80 }, last: { inputTokens: 100, outputTokens: 80 }, modelContextWindow: 200000,
+    } })
+    now = 14_500
+    server().emit('turn/completed', { turn: {
+      id: 'turn1', status: 'completed', durationMs: null, startedAt: null, completedAt: null,
+    } })
+    await result
+    expect(session.state.usage.lastTurn).toEqual({ turnId: 'turn1', outputTokens: 80, durationMs: 4500 })
   })
   it('initializes once, streams text without completion duplication, and records a replay boundary', async () => {
     const { session, server, deps } = setup()

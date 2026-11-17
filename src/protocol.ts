@@ -22,3 +22,12 @@ export function text(value: unknown): string { return typeof value === 'string' 
 export function positiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
 }
+/** Prefer the native duration, falling back to the protocol's second-based turn timestamps. */
+export function turnDurationMs(turn: unknown): number | undefined {
+  const value = record(turn)
+  if (positiveInteger(value.durationMs)) return value.durationMs
+  const { startedAt, completedAt } = value
+  if (!positiveInteger(startedAt) || !positiveInteger(completedAt) || completedAt <= startedAt) return undefined
+  const duration = (completedAt - startedAt) * 1000
+  return Number.isSafeInteger(duration) && duration > 0 ? duration : undefined
+}

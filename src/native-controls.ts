@@ -15,10 +15,27 @@ export function collaborationMode(mode: Mode, model: string, effort: string | nu
 export function unsupported(error: unknown): boolean {
   return error instanceof RpcError && (error.code === -32601 || (error.code === -32600 || error.code === -32602) && /experimental|unknown|unsupported|unrecognized|not found/i.test(error.message))
 }
+/** Current Codex normalizes its legacy `fast` alias to the `priority` tier. */
+export function isFastTier(tier: unknown): boolean { return tier === 'fast' || tier === 'priority' }
 
 /** Thread mutations never rewrite sandbox settings or retry an ambiguous model submission. */
 export class NativeControls {
   constructor(private readonly deps: ControlsDeps) {}
+  async setFast(enabled: boolean): Promise<void> {
+    const serviceTier = enabled ? 'fast' : null
+    try {
+      await this.deps.request('thread/settings/update', { serviceTier })
+      this.deps.update({ speed: { selected: enabled ? 'fast' : 'standard', effectiveTier: serviceTier, capability: 'supported' } })
+    } catch (error) {
+      this.deps.update({ speed: { ...this.deps.state().speed, ...(unsupported(error) ? { capability: 'unavailable' } : {}), error: String(error) } })
+      throw error
+    }
+  }
+  restoreSpeed(serviceTier: unknown): void {
+    if (serviceTier === null || typeof serviceTier === 'string') {
+      this.deps.update({ speed: { ...this.deps.state().speed, effectiveTier: isFastTier(serviceTier) ? 'fast' : serviceTier === 'default' ? null : serviceTier } })
+    }
+  }
   async setMode(mode: Mode, model: string, effort: string | null): Promise<void> {
     try {
       await this.deps.request('thread/settings/update', { collaborationMode: collaborationMode(mode, model, effort) })

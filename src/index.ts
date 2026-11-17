@@ -30,7 +30,7 @@ import type { DshAnswer, DshQuestion } from './questions.ts'
 import { SessionRegistry } from './session-registry.ts'
 import type { SessionStart } from './session-registry.ts'
 import { codexSpawnSpec } from './spawn.ts'
-import { initialNativeState, nativeStateProjection, publishNativeState } from './native-state.ts'
+import { initialNativeState, nativeStateProjectionWithDefaults, publishNativeState } from './native-state.ts'
 import type { NativeState } from './native-state.ts'
 import { codexCommand } from './commands.ts'
 import { codexInitializeParams, DEFAULT_CLIENT_NAME } from './client-identity.ts'
@@ -47,6 +47,7 @@ declare module '@deepseek-ai/cordis' {
 export interface Config {
   executable: string
   clientName: string
+  fastMode?: boolean
   inheritCredentials: boolean
   env: Record<string, string>
   requestTimeoutMs: number
@@ -65,6 +66,7 @@ export default class TavloCodex extends Service {
   static Config: z<Config> = z.object({
     executable: z.string().default(''),
     clientName: z.string().default(DEFAULT_CLIENT_NAME),
+    fastMode: z.boolean().description('Codex Fast 模式；不设置时沿用原生配置，会话内可用 /codex fast on|off 切换。'),
     inheritCredentials: z.boolean().default(true),
     env: z.dict(z.string()).default({}),
     requestTimeoutMs: z.natural().min(1).default(60_000),
@@ -98,6 +100,7 @@ export default class TavloCodex extends Service {
       createSession: (agent, id, cwd, start) => this.createSession(agent, id, cwd, start),
     })
     ctx.effect(() => ctx.commands.register(codexCommand({
+      fastMode: config.fastMode,
       state: agent => this.nativeStateHandle?.stateOf(agent.session) ?? initialNativeState(),
       resolve: agent => this.registry.resolveSession(agent.id),
       rename: (agent, title) => {
@@ -136,7 +139,7 @@ export default class TavloCodex extends Service {
     }, 'tavloCodex.sessions()')
   }
   protected async [Service.init](): Promise<void> {
-    this.nativeStateHandle = await this.ctx.sessionProjections.register(nativeStateProjection)
+    this.nativeStateHandle = await this.ctx.sessionProjections.register(nativeStateProjectionWithDefaults(this.config.fastMode))
     void this.discoverModels()
   }
   private discoverModels(): Promise<void> {
@@ -204,6 +207,7 @@ export default class TavloCodex extends Service {
     if (hostTitle) state.name = { ...state.name, title: hostTitle.title, pinned: hostTitle.source.kind === 'user' }
     return new CodexSession({
       dshSessionId: id, cwd, provider: PROVIDER, clientName: this.config.clientName,
+      fastMode: this.config.fastMode,
       sentMessageIds: start.sentMessageIds, inheritedReplay: start.inheritedReplay, after: start.after,
       cancelGraceMs: this.config.cancelGraceMs,
       nativeState: state,

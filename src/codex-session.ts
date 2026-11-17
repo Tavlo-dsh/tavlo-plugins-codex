@@ -12,7 +12,7 @@ import { mirrorArgs } from './mirror-args.ts'
 import { isEffortLevel } from './models.ts'
 import { APPROVAL_METHODS, permissionReason, permissionResult } from './permissions.ts'
 import type { ModelInfo, NativeItem, RpcNotification, RpcRequest, UserInput as NativeInput } from './protocol.ts'
-import { positiveInteger, record, text } from './protocol.ts'
+import { positiveInteger, record, text, turnDurationMs } from './protocol.ts'
 import { answerElicitation, toCodexAnswers, toDshQuestions } from './questions.ts'
 import type { AskQuestions } from './questions.ts'
 import { nativeReplayState, readNativeReplay, unseenUserInput } from './request-input.ts'
@@ -45,6 +45,8 @@ export interface CodexSessionDeps {
   readonly cwd: string
   readonly provider: string
   readonly clientName?: string
+  readonly fastMode?: boolean
+  readonly now?: () => number
   readonly sentMessageIds: ReadonlySet<string>
   readonly inheritedReplay?: ReturnType<typeof readNativeReplay>
   readonly nativeState: NativeState
@@ -93,6 +95,7 @@ export class CodexSession {
   private server: AppServer | undefined
   private threadId: string | undefined
   private turnId: string | undefined
+  private turnStartedAt: number | undefined
   private defaultModel: string | undefined
   private defaultEffort: string | null = null
   private appliedModel = DEFAULT_MODEL_ID
@@ -124,6 +127,7 @@ export class CodexSession {
   private nativeModels: readonly ModelInfo[] = []
   private readonly progress: NativeProgress
   private readonly diagnostics: NativeDiagnostics
+  private readonly now: () => number
   private progressTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(private readonly deps: CodexSessionDeps) {
@@ -139,6 +143,7 @@ export class CodexSession {
     this.agents = new NativeAgents(() => this.nativeState, agents => this.updateState({ agents }))
     this.progress = new NativeProgress(() => this.nativeState, (patch, final) => final ? this.updateState(patch) : this.deferState(patch))
     this.diagnostics = new NativeDiagnostics(() => this.nativeState, diagnostics => this.updateState({ diagnostics }))
+    this.now = deps.now ?? Date.now
   }
   get sentMessageIds(): ReadonlySet<string> { return this.sent }
   get state(): NativeState { return structuredClone(this.nativeState) }
@@ -162,6 +167,9 @@ export class CodexSession {
   }
   async setMode(mode: Mode, request: StepRequest): Promise<void> {
     await this.control(request, () => this.controls.setMode(mode, this.selectedModel(request.model), this.selectedEffort(request.reasoningEffort)))
+  }
+  async setFast(enabled: boolean, request: StepRequest): Promise<void> {
+    await this.control(request, () => this.controls.setFast(enabled))
   }
   async setName(title: string, pinned: boolean, request: StepRequest): Promise<void> {
     await this.control(request, () => this.controls.setName(title, pinned), true)
@@ -281,6 +289,18 @@ export class CodexSession {
   }
   private selectedModel(model: string): string { return model === DEFAULT_MODEL_ID ? this.defaultModel ?? DEFAULT_MODEL_ID : model }
   private selectedEffort(effort: string | undefined): string | null { return isEffortLevel(effort) ? effort : this.defaultEffort }
+  private speedParams(): { serviceTier?: string | null } {
+    const selected = this.nativeState.speed.selected
+    const enabled = selected === 'inherit' ? this.deps.fastMode : selected === 'fast'
+    return enabled === undefined ? {} : { serviceTier: enabled ? 'fast' : null }
+  }
+  private elapsedTurnDuration(): number | undefined {
+    const startedAt = this.turnStartedAt
+    this.turnStartedAt = undefined
+    if (startedAt === undefined) return undefined
+    const duration = Math.round(this.now() - startedAt)
+    return Number.isSafeInteger(duration) && duration > 0 ? duration : undefined
+  }
 
   private async ensureInitialized(request: StepRequest, signal: AbortSignal): Promise<void> {
     if (this.initialization === undefined) this.initialization = this.initialize(request, signal)
@@ -399,6 +419,7 @@ export class CodexSession {
       const sandbox = record(sandboxPolicy).type
       const params: Record<string, unknown> = {
         ...common,
+        ...this.speedParams(),
         cwd: this.deps.cwd,
         ...(sandbox === undefined ? {} : { sandbox: sandbox === 'dangerFullAccess' ? 'danger-full-access' : sandbox === 'workspaceWrite' ? 'workspace-write' : 'read-only' }),
         ...(resume === undefined ? {} : { threadId: resume.codexSessionId, excludeTurns: true }),
@@ -419,6 +440,7 @@ export class CodexSession {
       this.defaultModel = text(response.model) || undefined
       if (this.defaultModel) this.deps.onDefaultModel?.(this.defaultModel)
       this.defaultEffort = text(response.reasoningEffort) || null
+      this.controls.restoreSpeed(response.serviceTier)
       await this.controls.getGoal().catch(error => this.deps.warn(`Codex goal state unavailable: ${String(error)}`))
       if (this.nativeState.goal?.status === 'active') await this.controls.changeGoal('pause', undefined, 'automatic')
       this.controls.restoreMode(response.collaborationMode)
@@ -474,6 +496,7 @@ export class CodexSession {
       this.turnAbort = new AbortController()
       this.busy = true
       this.turnId = undefined
+      this.turnStartedAt = undefined
       this.appliedModel = request.model
       this.usageTracker.beginTurn(request.model)
       this.nativeState = { ...this.nativeState, usage: this.usageTracker.snapshot }
@@ -487,8 +510,10 @@ export class CodexSession {
       const onAbort = (): void => this.abandonTurn()
       signal.addEventListener('abort', onAbort, { once: true })
       try {
+        this.turnStartedAt = this.now()
         const result = record(await this.server!.request('turn/start', {
           threadId: this.threadId, input: content, ...policy,
+          ...this.speedParams(),
           ...(request.model === DEFAULT_MODEL_ID ? (this.defaultModel ? { model: this.defaultModel } : {}) : { model: request.model }),
           effort: this.selectedEffort(request.reasoningEffort),
           ...(this.nativeState.mode.explicit ? { collaborationMode: collaborationMode(this.nativeState.mode.selected, this.selectedModel(request.model), this.selectedEffort(request.reasoningEffort)) } : {}),
@@ -496,12 +521,13 @@ export class CodexSession {
         this.turnId ??= text(record(result.turn).id) || undefined
         if (!this.turnId) throw new Error('Codex did not return a turn id')
         this.usageTracker.setActiveTurnId(this.turnId)
-        this.nativeState = { ...this.nativeState, turnId: this.turnId }
+        this.nativeState = { ...this.nativeState, turnId: this.turnId, usage: this.usageTracker.snapshot }
         this.deps.publishNativeState(this.nativeState)
         if (this.cancellation !== undefined) this.interrupt()
         signal.throwIfAborted()
       } finally { signal.removeEventListener('abort', onAbort) }
     } catch (error) {
+      this.turnStartedAt = undefined
       // Transport failure is ambiguous: Codex might already be acting on the prompt.
       if (!submitted || error instanceof RpcError) {
         for (const id of input.ids) this.sent.delete(id)
@@ -524,6 +550,10 @@ export class CodexSession {
     if (this.busy && this.cancellation === undefined && !(typeof p.turnId === 'string' && p.threadId === this.threadId && this.turnId && p.turnId !== this.turnId)) this.progress.notification({ method, params: p })
     if (this.agents.notification({ method, params: p })) return
     if (p.threadId !== this.threadId) return
+    if (method === 'thread/settings/updated') {
+      this.controls.restoreSpeed(record(p.threadSettings).serviceTier)
+      return
+    }
     if (method === 'thread/name/updated') {
       const name = this.controls.observeName(p.threadName)
       if (name) this.deps.onNativeName?.(name)
@@ -561,7 +591,13 @@ export class CodexSession {
       const turn = record(p.turn)
       if (this.turnId && text(turn.id) !== this.turnId) return
       this.turnId = text(turn.id) || this.turnId
+      if (this.busy && this.turnId) {
+        this.usageTracker.setActiveTurnId(this.turnId)
+        const wallClockDuration = this.elapsedTurnDuration()
+        this.usageTracker.finishTurn(this.turnId, turnDurationMs(turn) ?? wallClockDuration)
+      }
       this.nativeState = { ...this.nativeState, ...(this.turnId ? { turnId: this.turnId } : {}),
+        usage: this.usageTracker.snapshot,
         ...(['requested', 'running'].includes(this.nativeState.compaction.status) ? { compaction: { status: turn.status === 'completed' ? 'completed' : 'failed' } } : {}) }
       this.deps.publishNativeState(this.nativeState)
       if (!this.busy) { this.changes.notify(); return }
