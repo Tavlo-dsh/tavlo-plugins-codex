@@ -1,12 +1,12 @@
 # Codex 插件开发进度
 
-最后更新：2026-11-16，Asia/Shanghai。
+最后更新：2026-11-17，Asia/Shanghai。
 
 开发范围与验收标准见 [接入计划](implementation-plan.md)，架构说明见 [接入设计](design.md)。本文件保存阶段状态、验证记录和继续开发入口。
 
 ## 当前状态
 
-当前版本：`0.1.1`，尚未发布。M1–M5 后端与命令已逐项实现并验证；M3.4 Goal 真实跨回合与 M4.4 子代理真实生命周期仍待验收。模型菜单首启只显示 Default 的缺陷已修复：插件启动即通过短暂 App Server 连接发现模型，不创建 thread；无缓存时目录查询会等待发现完成，结果发出模型目录更新事件。客户端名称默认改为 `codex_dsh` 并支持 `clientName` 配置，会话和模型发现统一初始化；客户端被拒绝的错误独立于登录错误。当前 16 文件 91 项测试、类型检查、本机协议检查和本地请求头抓包通过；用户已确认本次修复完成，AgentRouter 接入的自动验证仍限于本地请求头检查。真实已登录文字回合已有历史记录。完整图形与交互、真实故障验收继续保留未完成状态。
+当前版本：`0.1.1`，已于 2026-11-17 通过 GitHub Actions OIDC 发布到 npm。M1–M5 后端与命令已逐项实现并验证；M3.4 Goal 真实跨回合与 M4.4 子代理真实生命周期仍待验收。模型菜单首启只显示 Default 的缺陷已修复：插件启动即通过短暂 App Server 连接发现模型，不创建 thread；无缓存时目录查询会等待发现完成，结果发出模型目录更新事件。客户端名称默认改为 `codex_dsh` 并支持 `clientName` 配置，会话和模型发现统一初始化；客户端被拒绝的错误独立于登录错误。当前 16 文件 91 项测试、类型检查、本机协议检查和本地请求头抓包通过；用户已确认本次修复完成，AgentRouter 接入的自动验证仍限于本地请求头检查。真实已登录文字回合已有历史记录。完整图形与交互、真实故障验收继续保留未完成状态。
 
 | 阶段 | 状态 | 已完成内容 | 下一步 |
 | --- | --- | --- | --- |
@@ -50,6 +50,7 @@
 | 2026-11-16 | `pnpm test` / `pnpm typecheck` | 通过，16 文件 91 项 | 配置默认值、自定义名称与非法头值、真实会话握手、供应商客户端拒绝分类 |
 | 2026-11-16 | `pnpm test:local` | 通过 | CLI 0.169.0，9 模型、线程、Plan、名称、暂停 Goal、预算、0 模型回合，UA 为 codex_dsh |
 | 2026-11-16 | 本地 HTTP 请求头检查 | 通过 | 临时 CODEX_HOME、假密钥、loopback 服务，确认默认与配置的 originator / User-Agent；未请求 AgentRouter |
+| 2026-11-17 | GitHub Actions / npm OIDC 发布 | 通过，0.1.1 | Ubuntu 上 91 项测试、类型检查、构建与打包；npm 包下载、SHA-512、8 项关键文件及 provenance 核对通过 |
 | 待执行 | 完整真实交互与图形验收 | 待验收 | 图片／工具／审批／恢复／分叉／Plan、Goal 跨回合、子代理、故障恢复 |
 
 ## 继续开发入口
@@ -58,7 +59,7 @@
 2. 在独立验收 profile 中逐项做 M6.2：真实图片、工具、允许／拒绝／取消、恢复／分叉、名称与 Plan；沿用 `.refs/verification/codex-acceptance.patch.yml`，避免修改默认 profile。
 3. 对 M3.4 的两回合 Goal 与重启、M4.4 的并发代理／父子停止和 M6.3 的真实进程故障分别留证据；未完成前不勾选。
 4. 当前 headless 文字证据保存在工作区 `.refs/verification/dsh-acceptance-result.json`，对应会话 `session-19e68182-ebae-4487-ae4d-f716c811af30`。候选包 hash 和验收限制已保留；后续真实测试应核对实际安装内容，避免同版本 tar 缓存。
-5. 当前 `0.1.1` 的打包与安装命令见 README。既有 `web` profile 已通过 `link:` 引用源码目录，构建后重启即可更新；改装 tar 时保留依赖别名 `tavlo-plugins-codex`。用户已授权本次发布；GitHub Actions 工作流与 npm 受信任发布者配置见 README。
+5. 当前 `0.1.1` 的打包与安装命令见 README。既有 `web` profile 已通过 `link:` 引用源码目录，构建后重启即可更新；改装 tar 时保留依赖别名 `tavlo-plugins-codex`。0.1.1 已通过 GitHub Actions 与 npm Trusted Publishing 发布；后续版本的发布方式见 README。
 
 ## 开发日志
 
@@ -173,3 +174,9 @@
 - 追加 0.1.1 变更记录，包含客户端身份、诊断和彩色 Codex 图标；图标原样使用用户提供的 SVG，并在独立文件保留许可。
 - npm 注册表当前 latest 为 0.1.0；配置 Trusted Publisher 时 npm 要求账户双重认证，需维护者本人完成。0.1.1 尚未发布。
 - 首次 Ubuntu 工作流中 90 项测试通过，Windows shim 测试因宿主路径分隔符不同失败；统一 shim 路径分隔符后重新验证。
+
+### 2026-11-17 npm 0.1.1 发布完成
+
+- npm 维护者完成账户认证后，成功绑定仓库 `Tavlo-dsh/tavlo-plugins-codex` 的 `publish.yml` 为受信任发布者，无需长期 npm token。
+- 标签 `v0.1.1` 指向发布提交 `877209d4899dbe86a19af07f728c08718804a3b8`，触发 [GitHub Actions 发布](https://github.com/Tavlo-dsh/tavlo-plugins-codex/actions/runs/43994707618)，验证与发布作业均成功。
+- [npm 0.1.1](https://www.npmjs.com/package/dsh-plugin-codex-app-server/v/0.1.1) 已可下载；已核对注册表 SHA-512、8 项关键文件和 GitHub Actions provenance，结果保存在工作区 `.refs/verification/npm-release-0.1.1-result.json`。
