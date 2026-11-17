@@ -1,6 +1,6 @@
 # Codex 接入设计
 
-开发与验收按 [开发计划](implementation-plan.md) 推进；阶段状态与验证记录见 [开发进度](progress.md)。客户端保留 Fast 开关和原生统计；Plan、工具进度、Goal 和子代理沿用命令入口。
+开发与验收按 [开发计划](implementation-plan.md) 推进；阶段状态与验证记录见 [开发进度](progress.md)。客户端保留 Fast 开关和原生统计，复用 DSH 既有目标入口与目标栏；Plan、工具进度和子代理沿用命令入口。
 
 ## 接入点
 
@@ -46,6 +46,7 @@ sequenceDiagram
 | `auxiliary.ts` | 将标题／摘要路由到普通模型，避免污染原生会话。 |
 | `native-state.ts` / `usage-tracker.ts` | 可重放的原生状态投影、累计消耗与独立上下文快照。 |
 | `native-controls.ts` / `commands.ts` | 原生模式、名称、Goal 控制及 DSH slash command。 |
+| `host-goal.ts` | 宿主目标版本与原生 Goal 绑定、准入检查、状态同步和终态回传；续轮由 DSH 管理。 |
 | `native-agents.ts` | 子线程身份、父子关系、状态与实际模型信息。 |
 | `native-images.ts` / `native-progress.ts` / `native-diagnostics.ts` | 持久图片、有界执行进度和运行诊断。 |
 
@@ -101,11 +102,13 @@ Fast 使用同一会话控制锁，通过 `thread/settings/update.serviceTier` �
 
 会话名称通过 `thread/name/set` 与通知同步。DSH 人工标题固定优先，原生自动名称以 provider 来源填充宿主标题；过滤回声，重命名错误与回合错误独立。session observer 内的同步安排在异步边界，避免递归 append。
 
-Goal 修改前读取权威状态。只有显式 set 传 objective，并初始保存为 paused；状态与预算修改保留已有用量。用户操作使用 origin=user，回合边界暂停使用 automatic。resume 只驱动一个受管 DSH 回合，结束自动暂停；turn/completed 不代表 goal complete。未受管续跑立即中断，暂停失败关闭进程。预算耗尽不能自动解除，增加预算也不自动恢复。
+Goal 修改前读取权威状态。创建或正文替换时传 objective，初始保存为 paused；状态与预算修改保留已有用量。用户操作使用 origin=user，回合边界暂停使用 automatic。独立 `/codex goal resume` 只驱动一个受管 DSH 回合，结束自动暂停；turn/completed 不代表 goal complete。未受管续跑立即中断，暂停失败关闭进程。预算耗尽不能自动解除，增加预算也不自动恢复。
+
+宿主目标模式使用 `ctx.goals` 作为目标身份、版本、轮数与授权来源；`goal-round-driver` 唯一负责续轮。插件只转发 ID／revision／round 与当前 active/armed 目标匹配的宿主消息，在提交前激活原生 Goal。边界读取原生终态并回传 `ctx.goals`，再技术性暂停原生 Goal；此暂停不回写宿主 phase。执行中编辑、暂停或清除先中断旧回合，版本检查阻止旧结果覆盖新目标。终态回传的宿主事件通过同步保护避免回声中断。绑定保存于 `tavloCodex.hostGoal`，既有目标栏仍读取宿主 `goal` 投影；不新增客户端状态源。完整规则见 [目标桥接设计](host-goal-design.md)。
 
 正常释放会话先在有界时间内暂停目标、停止后代，再关闭进程。异常退出保留最后观测状态并注明连接结束，恢复时重新读取原生 Goal、保留预算与用量并暂停遗留 active 状态。边界暂停只作用于当前仍 active 的目标，不覆盖已经 complete、blocked 或受限的状态。活动目标拒绝再次 resume；恢复命令无法提交受管回合时撤回活动执行。Fork 清除父目标快照后读取新线程实际目标。
 
-用户确认不需要额外的 Plan／工具进度／Goal／子代理面板，因此不注册 `conversation.input.dock`。相关状态继续保存在原生投影中，通过 `/codex` 命令查询和操作；现有 Fast 开关与统计底栏保留。
+用户确认不需要额外的 Plan／工具进度／Goal／子代理面板，因此不注册 `conversation.input.dock`。相关状态继续保存在原生投影中，通过 `/codex` 命令查询和操作；宿主管理的目标使用既有目标栏或 `/goal`，阻止独立原生命令竞争修改。现有 Fast 开关与统计底栏保留。
 
 ## 子代理、图片与执行状态
 
@@ -121,4 +124,4 @@ Goal 修改前读取权威状态。只有显式 set 传 objective，并初始保
 
 自动测试验证 JSONL 分片、乱序应答、RPC 拒绝、断开与超时，以及会话去重、进程替换、工具续读、审批、用户问题、恢复／分叉、用量与投影重放、Plan、Goal、代理、图片、进度、诊断和 DSH 真实 LLM runtime 的辅助路由。`scripts/smoke.mjs` 使用隔离临时 Codex home 验证模型、线程、Plan、名称和暂停 Goal，不提交模型请求。
 
-协议字段已核对 `codex-cli 0.169.0` 的实验类型，并参照[官方接口文档](https://learn.chatgpt.com/docs/app-server)。真实 DSH headless 文字回合、真实 Codex Goal 跨回合和子代理停止／重启均有验证记录，见 [本轮验证](workspace-verification.md)。此前通过浏览器验收的四项工作面板已按用户反馈撤下。其余图片、恢复／分叉的完整界面组合与旧 CLI 兼容仍单独跟踪。
+协议字段已核对 `codex-cli 0.169.0` 的实验类型，并参照[官方接口文档](https://learn.chatgpt.com/docs/app-server)。真实 DSH headless 文字回合、真实 Codex Goal 跨回合和子代理停止／重启，以及真实 DSH + Codex 目标桥接均有验证记录，见 [本轮验证](workspace-verification.md)。目标桥接验证实际宿主服务和既有目标栏投影，未含浏览器点击；此前通过浏览器验收的四项工作面板已按用户反馈撤下。其余图片、恢复／分叉的完整界面组合与旧 CLI 兼容仍单独跟踪。

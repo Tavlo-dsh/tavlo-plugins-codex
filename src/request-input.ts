@@ -6,6 +6,8 @@
  */
 
 import type { ReplayEnvelope, RequestMessage } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-goal'
+import type { HostGoalRound } from './host-goal.ts'
 
 /** Reference to an image in DSH's attachment store. */
 export interface ImageRef {
@@ -30,11 +32,12 @@ export type InputBlock =
 export interface UserInput {
   readonly ids: readonly string[]
   readonly blocks: readonly InputBlock[]
+  readonly goalRound?: HostGoalRound
 }
 
 /**
- * Sources written by a person. DSH also uses the user role for reminders meant for
- * its own model; forwarded, they would start Codex turns nobody asked for.
+ * Sources forwarded directly. Host-authorized goal rounds are checked separately;
+ * other user-role reminders must not start native turns on their own.
  */
 const FORWARDED_KINDS: ReadonlySet<string> = new Set(['user', 'schedule'])
 
@@ -83,8 +86,9 @@ function isScheduleNotice(message: RequestMessage): boolean {
   return first?.type === 'text' && first.text.startsWith(SCHEDULE_NOTICE_PREFIX)
 }
 
-function isForwarded(message: RequestMessage): boolean {
+function isForwarded(message: RequestMessage, acceptsGoal: (round: HostGoalRound) => boolean): boolean {
   if (message.role !== 'user') return false
+  if (message.source?.kind === 'goal') return message.id !== undefined && acceptsGoal({ id: message.source.goalId, revision: message.source.revision, round: message.source.round })
   // Producers extend this union; compare it as a plain string.
   const kind: string | undefined = message.source?.kind
   if (kind === 'schedule' && isScheduleNotice(message)) return false
@@ -98,19 +102,23 @@ function isForwarded(message: RequestMessage): boolean {
  * @param messages - the derived request history.
  * @param seen - ids already sent.
  * @param currentTurn - ids of the user messages in the open DSH turn.
+ * @param acceptsGoal - validates the current host-owned goal revision and admitted round.
  */
 export function unseenUserInput(
   messages: readonly RequestMessage[],
   seen: ReadonlySet<string>,
   currentTurn: ReadonlySet<string>,
+  acceptsGoal: (round: HostGoalRound) => boolean = () => false,
 ): UserInput {
   const fresh = messagesAfterLastReply(messages).filter(
     (message) =>
-      isForwarded(message) && (message.id === undefined || (!seen.has(message.id) && currentTurn.has(message.id))),
+      isForwarded(message, acceptsGoal) && (message.id === undefined || (!seen.has(message.id) && currentTurn.has(message.id))),
   )
+  const source = fresh.find(message => message.source?.kind === 'goal')?.source
   return {
     ids: fresh.flatMap((message) => (message.id === undefined ? [] : [message.id])),
     blocks: fresh.flatMap(inputBlocks),
+    ...(source?.kind === 'goal' ? { goalRound: { id: source.goalId, revision: source.revision, round: source.round } } : {}),
   }
 }
 

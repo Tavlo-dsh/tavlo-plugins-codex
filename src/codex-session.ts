@@ -25,6 +25,7 @@ import { NativeControls, collaborationMode } from './native-controls.ts'
 import type { Mode } from './native-controls.ts'
 import { NativeAgents, runningAgent } from './native-agents.ts'
 import { NativeLifecycle } from './native-lifecycle.ts'
+import { HostGoalBridge, type HostGoalPort } from './host-goal.ts'
 import { importNativeImage } from './native-images.ts'
 import type { NativeImageStore } from './native-images.ts'
 import { boundedOutput, NativeProgress } from './native-progress.ts'
@@ -42,6 +43,7 @@ export interface StepRequest {
   readonly currentTurnMessageIds: ReadonlySet<string>
 }
 export interface CodexSessionDeps {
+  readonly hostGoal?: HostGoalPort
   readonly dshSessionId: string
   readonly cwd: string
   readonly provider: string
@@ -124,6 +126,8 @@ export class CodexSession {
   private controlling = false
   private readonly controls: NativeControls
   private goalBoundary: Promise<void> = Promise.resolve()
+  private hostGoalUpdates: Promise<void> = Promise.resolve()
+  private readonly hostGoals: HostGoalBridge
   private childrenBoundary: Promise<void> = Promise.resolve()
   private readonly agents: NativeAgents
   private readonly lifecycle: NativeLifecycle
@@ -149,6 +153,10 @@ export class CodexSession {
     this.controls = new NativeControls({
       state: () => this.nativeState,
       update: patch => this.updateState(patch),
+      request: (method, params) => this.server!.request(method, { ...params, threadId: this.threadId }),
+    })
+    this.hostGoals = new HostGoalBridge({ host: deps.hostGoal, state: () => this.nativeState,
+      bind: hostGoal => this.updateState({ hostGoal }), controls: this.controls,
       request: (method, params) => this.server!.request(method, { ...params, threadId: this.threadId }),
     })
     this.agents = new NativeAgents(() => this.nativeState, agents => this.updateState({ agents }))
@@ -251,6 +259,7 @@ export class CodexSession {
     await this.control(request, () => this.controls.setName(title, pinned), true)
   }
   async goal(action: 'get' | 'set' | 'pause' | 'resume' | 'clear' | 'budget', request: StepRequest, value?: string | number | null): Promise<void> {
+    if (action !== 'get' && this.hostGoals.managed()) throw new Error('当前目标由 DSH 管理，请使用已有目标栏或 /goal 命令。')
     await this.control(request, async () => {
       if (action === 'get') await this.controls.getGoal()
       else if (action === 'set') await this.controls.setGoal(typeof value === 'string' ? value : '')
@@ -335,11 +344,32 @@ export class CodexSession {
     }, 1000)
     this.lifecycleTimer.unref()
   }
-  private pauseGoalAtBoundary(): void {
-    if (this.nativeState.goal?.status !== 'active') return
+  /** Goal events may fire inside a host log append; defer native writes. */
+  refreshHostGoal(): Promise<void> {
+    if (this.hostGoals.reporting || !this.threadId || this.failure !== undefined) return Promise.resolve()
+    const update = this.hostGoalUpdates.then(async () => {
+      const interrupted = this.busy && this.hostGoals.invalidated()
+      if (interrupted) this.abandonTurn()
+      await this.cancellation
+      await Promise.all([this.goalBoundary, this.childrenBoundary])
+      this.throwIfDead()
+      if (!this.busy) await this.hostGoals.sync()
+      // Edit/clear do not necessarily abort the host request signal. Release its
+      // reader too, so DSH can reach idle and consider the new goal revision.
+      if (interrupted && !this.activeRequest?.signal?.aborted) this.events.push({ type: 'end', reason: ABORTED })
+    })
+    this.hostGoalUpdates = update.catch(error => this.die(error instanceof Error ? error : new Error(String(error))))
+    return update
+  }
+  private pauseGoalAtBoundary(failure?: string): void {
+    if (!this.server || !this.threadId) return
+    if (this.nativeState.goal?.status !== 'active' && !this.hostGoals.managed()) return
+    // Capture this round now; later changes must not attribute it to a new goal revision.
+    const finishHostGoal = this.hostGoals.managed() ? this.hostGoals.finish(failure) : undefined
+    void finishHostGoal?.catch(() => undefined)
     this.goalBoundary = this.goalBoundary.then(async () => {
       const deadline = AbortSignal.any([this.lifetime.signal, AbortSignal.timeout(this.deps.cancelGraceMs)])
-      await untilAborted((async () => {
+      await untilAborted(finishHostGoal ?? (async () => {
         const goal = await this.controls.getGoal()
         if (goal?.status === 'active') await this.controls.changeGoal('pause', undefined, 'automatic')
       })(), deadline)
@@ -351,7 +381,7 @@ export class CodexSession {
     this.controlling = true
     try {
       await this.ensureInitialized(request, request.signal ?? NEVER)
-      await Promise.all([this.goalBoundary, this.childrenBoundary])
+      await Promise.all([this.goalBoundary, this.childrenBoundary, this.hostGoalUpdates])
       request.signal?.throwIfAborted()
       this.throwIfDead()
       return await action()
@@ -402,7 +432,7 @@ export class CodexSession {
       await this.permissionUpdates
       signal.throwIfAborted()
       const seen = new Set([...this.sent, ...this.reserved])
-      const input = unseenUserInput(request.messages, seen, request.currentTurnMessageIds)
+      const input = unseenUserInput(request.messages, seen, request.currentTurnMessageIds, round => this.hostGoals.accepts(round))
       if (input.blocks.length || input.ids.length) {
         if (this.busy || this.events.size > 0) {
           for (const id of input.ids) this.reserved.add(id)
@@ -464,6 +494,7 @@ export class CodexSession {
     this.changes.notify()
   }
   async dispose(reason?: string): Promise<void> {
+    try { this.hostGoals.suspend() } catch (error) { this.deps.warn(`DSH 目标暂停失败：${String(error)}`) }
     if (!this.failure && this.threadId) {
       this.pauseGoalAtBoundary()
       this.stopChildren()
@@ -525,7 +556,7 @@ export class CodexSession {
       } else if (fork || this.nativeState.threadId !== resume.codexSessionId) this.usageTracker.rebaseUnknown()
       if (fork) {
         const { diff: _inheritedDiff, ...state } = this.nativeState
-        this.nativeState = { ...state, agents: {}, tools: {}, goal: null }
+        this.nativeState = { ...state, agents: {}, tools: {}, goal: null, hostGoal: null }
       }
       this.nativeState = { ...this.nativeState, threadId: this.threadId, dshSessionId: this.deps.dshSessionId, usage: this.usageTracker.snapshot, compaction: { status: 'idle' } }
       this.defaultModel = text(response.model) || undefined
@@ -570,6 +601,7 @@ export class CodexSession {
 
   private async submit(input: UserInput, request: StepRequest, signal: AbortSignal, permissionContinuation = false): Promise<void> {
     if (!permissionContinuation) await this.permissionUpdates
+    await Promise.all([this.goalBoundary, this.childrenBoundary, this.hostGoalUpdates])
     signal.throwIfAborted()
     this.throwIfDead()
     if (['requested', 'running'].includes(this.nativeState.compaction.status)) throw new Error('Codex 正在压缩上下文，请稍后重试。')
@@ -592,6 +624,9 @@ export class CodexSession {
           content.push({ type: 'image', url: `data:${block.ref.mediaType};base64,${Buffer.from(data).toString('base64')}` })
         }
       }
+      signal.throwIfAborted()
+      this.throwIfDead()
+      if (!await this.hostGoals.prepare(input.goalRound)) return
       signal.throwIfAborted()
       this.throwIfDead()
       const policy = this.deps.policy()
@@ -640,7 +675,14 @@ export class CodexSession {
         for (const id of input.ids) this.sent.delete(id)
         this.updateState({ sentInputIds: [...this.sent].slice(-8192) })
       }
-      if (submitted && error instanceof RpcError) { this.busy = false; this.completeCancellation() }
+      if (submitted && error instanceof RpcError) {
+        this.busy = false
+        this.completeCancellation()
+        if (this.hostGoals.managed()) {
+          this.pauseGoalAtBoundary(error.message)
+          await this.goalBoundary.catch(() => undefined)
+        }
+      }
       else if (submitted && !signal.aborted) this.die(error instanceof Error ? error : new Error(String(error)))
       throw error
     } finally { for (const id of input.ids) this.reserved.delete(id) }
@@ -673,7 +715,7 @@ export class CodexSession {
     if (method === 'thread/goal/updated' || method === 'thread/goal/cleared') {
       try { this.controls.observeGoal(method.endsWith('/cleared') ? null : p.goal) }
       catch (error) { this.deps.warn(String(error)) }
-      if (!this.busy && !this.controlling) this.pauseGoalAtBoundary()
+      if (!this.busy && !this.controlling && !this.hostGoals.synchronizing) this.pauseGoalAtBoundary()
       return
     }
     if (method === 'turn/started') {
@@ -714,7 +756,7 @@ export class CodexSession {
         ...(['requested', 'running'].includes(this.nativeState.compaction.status) ? { compaction: { status: turn.status === 'completed' ? 'completed' : 'failed' } } : {}) }
       this.deps.publishNativeState(this.nativeState)
       if (!this.busy) { this.changes.notify(); return }
-      this.pauseGoalAtBoundary()
+      this.pauseGoalAtBoundary(turn.status === 'failed' ? text(record(turn.error).message) || 'Codex 原生回合执行失败。' : undefined)
       this.stopChildren()
       this.busy = false
       this.cancelRequests()
@@ -883,6 +925,7 @@ export class CodexSession {
   private die(error: Error): void {
     if (this.failure !== undefined) return
     this.failure = error
+    try { this.hostGoals.fail(error) } catch (cause) { this.deps.warn(`DSH 目标状态回传失败：${String(cause)}`) }
     this.busy = false
     clearTimeout(this.lifecycleTimer); this.lifecycleTimer = undefined
     if (this.nativeState.goal?.status === 'active') {

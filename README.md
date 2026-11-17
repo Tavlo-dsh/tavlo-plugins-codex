@@ -6,7 +6,7 @@
 
 DeepSeek Harness（DSH）插件：通过本机 **`codex app-server`** 把 Codex 注册为模型提供方 `codex`。每个 DSH 会话拥有一个常驻进程和一个原生 Codex thread，使用标准输入／输出上的双向 JSON-RPC 通信。
 
-Codex 自己负责 agent loop、system prompt、工具执行、AGENTS.md、原生配置与登录态、MCP、skills、子代理和自动压缩。DSH 负责展示文本与思考、镜像工具卡片、权限审批和用户提问。插件在模型选择器左侧提供 **闪电 Fast 开关**，通过 `/codex` 提供 Fast、Plan、名称、Goal、子代理、用量与执行交互入口，并通过 `tavloCodex` 会话投影发布状态。
+Codex 自己负责 agent loop、system prompt、工具执行、AGENTS.md、原生配置与登录态、MCP、skills、子代理和自动压缩。DSH 负责展示文本与思考、镜像工具卡片、权限审批和用户提问。插件在模型选择器左侧提供 **闪电 Fast 开关**，复用 DSH 的**目标模式入口和目标栏**，通过 `/codex` 提供 Plan、名称、子代理、用量与执行交互入口，并通过 `tavloCodex` 会话投影发布原生状态。
 
 接口依据：[官方 Codex App Server 文档](https://learn.chatgpt.com/docs/app-server)。
 
@@ -51,23 +51,25 @@ dsh plugin --profile web add "$(pwd)"
 | 提问 | `item/tool/requestUserInput` 转为 DSH 问题卡片，按原始问题 id 返回回答。无法展示时返回空回答，不捏造选择。 |
 | MCP elicitation | 支持简单平面表单的字符串、枚举、数字、整数和布尔字段。URL 模式展示链接，等待用户手动完成后确认。复杂表单拒绝，密码字段不通过对话日志收集。 |
 | 停止 | 图片准备阶段取消不提交消息；原生回合开始后调用 `turn/interrupt`，超过 `cancelGraceMs` 仍未完成则终止进程。插件停止或会话释放时由 DSH 回收子进程。 |
-| 输入去重 | 只提交当前 DSH 回合里尚未发送的用户／日程消息。明确的模型／参数拒绝可重试；传输断开后不自动重放可能已执行的消息。 |
+| 输入去重 | 只提交当前 DSH 回合里尚未发送的用户／日程消息，以及目标 ID、版本和轮数匹配的宿主已准入目标消息。明确的模型／参数拒绝可重试；传输断开后不自动重放可能已执行的消息。 |
 | 上下文与用量 | 输入框下方显示累计 token、缓存命中率、最近回合平均速度和上下文占用。`total` 水位差分记录消耗，`last` 保存最近调用快照，容量来自 `modelContextWindow`。读取 `tavloCodex.usage`，不向宿主标准 usage 写入混用两个口径的数据。 |
 | Plan 与名称 | 通过 `/codex plan/default/execute/keep` 切换模式和确认计划，`/codex usage` 查询步骤与正文。确认执行先切回 Default，再提交确认；模式独立于权限。人工会话名称优先。 |
 | Fast | 点击模型选择器左侧的**闪电开关**，或使用 `/codex fast on` 开启、`off` 关闭、`status` 查询。会话选择覆盖插件 `fastMode` 默认值；均未设置时沿用原生 Codex 配置。选择持久化，在新建、恢复、分叉与后续回合传递，不改动模型、推理强度或权限。 |
-| Goal | `/codex goal` 设置目标、预算、继续一轮、暂停和清除。仅显式创建，初始暂停；状态／预算调整保留已用量。回合结束与正常卸载时暂停，异常重启先读取并暂停遗留活动目标；已完成或受限状态不会被边界暂停覆盖。 |
+| Goal | 使用 DSH 目标模式或 `/goal` 创建和管理目标，既有目标栏显示完成、暂停或受阻。DSH 按自身轮数上限调度续轮；Codex 每轮结束先回传状态，再技术性暂停原生 Goal。没有宿主目标时仍可用 `/codex goal` 独立控制原生目标。 |
 | 子代理 | `/codex agents/agent` 查询关系、状态和结果，`agent-message/agent-interrupt` 发送补充指令或停止。原生事件结合每秒只读后代查询补齐状态，不为观察而恢复子线程；父边界等待真实停止终态，超时关闭进程。 |
-| 图片与进度 | 图片输入按原生模型能力校验；可访问的图片结果存入 DSH 附件库。「工具进度」实时显示命令输出、MCP 消息、补丁与 diff，最终输出替换临时增量；输出跟随末尾，用户上翻后保留阅读位置。 |
+| 图片与进度 | 图片输入按原生模型能力校验；可访问的图片结果存入 DSH 附件库。命令增量、MCP 消息、补丁与 diff 保存到持久投影，通过 `/codex progress` 查询；最终输出替换临时增量，保留原有工具结果卡。 |
 
 ## 原生操作入口
 
-输入框保持原有布局，Plan、工具进度、Goal 与子代理通过下方 `/codex` 命令操作和查询。未完成的 Plan 草稿不能执行；模式切换、执行计划和恢复 Goal 需等待当前任务结束。Goal 采用每轮暂停、显式继续的方式。
+输入框保持原有布局，目标使用 DSH 既有目标入口和目标栏；Plan、工具进度与子代理通过下方 `/codex` 命令操作和查询。未完成的 Plan 草稿不能执行；模式切换、执行计划和独立原生 Goal 恢复需等待当前任务结束。
+
+在 DSH 目标模式输入目标后，宿主负责自动续轮，Codex 执行并将完成、受阻和显式暂停回传到同一个目标栏。可在既有目标栏编辑、暂停、恢复或清除目标；执行中编辑或清除会先停止旧回合，旧版本结果不会覆盖新目标。DSH 轮数上限与 Codex token 预算分别管理，增加轮数不会解除原生用量限制。未加载 DSH Goal 服务的 profile 仍可进行普通对话。
 
 选择 Codex 模型后，模型选择器左侧会显示独立的**闪电开关**，不会覆盖或占用模型按钮。闪电点亮表示 Fast 开启，描边表示关闭；点击即可为当前会话切换，后续回合使用该选择。切换中和任务运行中禁用；原生接口拒绝时显示错误并保留原设置。尚未读取原生默认值时，无障碍状态与提示会说明正在继承默认值，不把未知状态当成已确认关闭。此入口使用 DSH `0.2.2-rc.1` 已发布的输入栏扩展位，无需修改宿主。
 
 输入框下方按 **轮数／步数 → 均速 → token／缓存命中率 → 上下文占用** 排列。Codex 统计读取持久化的原生数据；点击均速、token／缓存或上下文可打开与宿主统计卡片同类的详情面板，查看口径和精确计数，文字被截断时悬停或键盘聚焦仍可查看完整读数。累计 token 与缓存命中率使用已观测消耗，上下文百分比使用最近一次调用的输入与输出除以原生窗口容量；压缩后等待新快照。**“均速”是最近计时回合的输出 token / 原生回合总耗时，包含工具执行与等待，不是纯生成速率。** 回合耗时优先取 `durationMs`，缺失时依次使用原生 `startedAt/completedAt` 和插件观测到的回合墙钟时间；没有 `turnId` 的晚到用量仍会与刚完成的回合配对。旧日志完全缺少计时时显示 `—`，后续完成回合并收到用量及耗时后更新。缺失容量或快照也显示 `—`，不伪装成 0%。
 
-在选择 Codex 模型的 DSH 会话中使用以下命令。切换 Fast、设置模式、手动压缩、执行确认和 Goal 恢复需等待当前 DSH 任务结束。
+在选择 Codex 模型的 DSH 会话中使用以下命令。切换 Fast、设置模式、手动压缩、执行确认和独立原生 Goal 恢复需等待当前 DSH 任务结束。
 
 | 命令 | 行为 |
 | --- | --- |
@@ -78,9 +80,10 @@ dsh plugin --profile web add "$(pwd)"
 | `/codex execute`、`/codex keep` | 确认执行最终 Plan，或保留当前计划和模式。 |
 | `/codex name <名称>` | 人工命名并同步到原生 thread。 |
 | `/codex compact` | 请求原生压缩；完成状态用 usage 查询。 |
-| `/codex goal set <目标>`、`/codex goal get` | 创建暂停的原生目标，或读取当前状态。 |
-| `/codex goal resume`、`pause`、`clear` | 显式继续一轮、暂停并停止当前 DSH 回合，或清除目标。 |
-| `/codex goal budget <正整数或 none>` | 更新 token 预算，不重置已用量，也不自动恢复运行。 |
+| `/goal` | DSH 原有目标命令入口，与既有目标栏共用目标；具体子命令以宿主帮助为准。 |
+| `/codex goal set <目标>`、`/codex goal get` | 无宿主目标时创建暂停的独立原生目标；查询不受此限制。 |
+| `/codex goal resume`、`pause`、`clear` | 独立原生目标显式继续一轮、暂停并停止当前 DSH 回合，或清除目标；宿主管理时请用目标栏或 `/goal`。 |
+| `/codex goal budget <正整数或 none>` | 更新独立原生目标的 token 预算，不重置已用量，也不自动恢复运行；宿主管理时不允许此修改。 |
 | `/codex agents`、`/codex agent <threadId>` | 列出已观测代理，或读取其最近三轮历史。 |
 | `/codex agent-message <threadId> <消息>`、`/codex agent-interrupt <threadId>` | 对已知子代理的活跃回合追加消息或请求中断。 |
 | `/codex progress [itemId]` | 查看已观测工具输出、MCP 消息与补丁；保留有界尾部并标注截断。 |
@@ -89,7 +92,7 @@ dsh plugin --profile web add "$(pwd)"
 
 Fast 通常消耗更多额度，模型服务商仍需支持该档位；原生接口拒绝切换时会显示错误并保留此前选择。图形开关和 `/codex fast on/off` 共用插件命令入口，不会把 `/fast` 当作普通提示词发给模型。
 
-客户端可消费 `tavloCodex` 投影中的 `usage`、`compaction`、`mode`、`speed`、`plan`、`name`、`goal`、`goalControl`、`agents`、`tools`、`diff`、`steering` 和 `diagnostics`。`speed` 保存会话选择（`inherit`／`fast`／`standard`）、原生 `effectiveTier` 和设置错误；`fastModeDefault` 仅在客户端视图中提供插件默认值，不写入会话历史。客户端提供闪电 Fast 开关与底栏统计，四项独立工作面板已按用户反馈撤下；具体约束见 [兼容矩阵](docs/compatibility.md)。
+客户端可消费 `tavloCodex` 投影中的 `usage`、`compaction`、`mode`、`speed`、`plan`、`name`、`goal`、`hostGoal`、`goalControl`、`agents`、`tools`、`diff`、`steering` 和 `diagnostics`。`speed` 保存会话选择（`inherit`／`fast`／`standard`）、原生 `effectiveTier` 和设置错误；`fastModeDefault` 仅在客户端视图中提供插件默认值，不写入会话历史。`hostGoal` 保存原生目标与宿主版本的绑定，既有目标栏仍读取宿主 `goal` 投影。客户端提供闪电 Fast 开关与底栏统计，四项独立工作面板已按用户反馈撤下；具体约束见 [兼容矩阵](docs/compatibility.md)。
 
 ## 配置
 
@@ -153,7 +156,7 @@ Fast 通常消耗更多额度，模型服务商仍需支持该档位；原生接
 - 权限选择的沙箱映射在新原生回合开始时生效；回合中切换权限会取消旧审批、中断旧回合，再按最新设置接续同一线程。已经执行的外部操作不会撤销。
 - DSH Auto 审查预设依赖宿主工具执行链；Codex 原生工具不经过该链，因此暂不支持。请使用明确的沙箱和审批组合。
 - DSH 内置 token-meter 共用单次 usage 统计消耗与上下文，不能准确表示原生多次模型调用。Codex 权威统计使用独立投影；未知旧线程恢复／分叉首通知只计最近调用，标记 `inferred`，此前未观测调用可能少计。
-- 当前 `/codex goal` 控制 Codex 原生 Goal，每个 DSH 回合结束自动暂停；尚未与 DSH 自带目标模式及目标栏联动，也未开放无人干预的连续循环。
+- 自动目标续轮由 DSH 的 Goal 服务与 round driver 管理，遵守宿主轮数上限、暂停及恢复规则；插件不会另起原生续跑循环。独立 `/codex goal` 仍采用显式继续一轮的策略。目标正文编辑可能重置原生目标用量，但不会重置 DSH 已用轮数或插件累计 token 统计。
 - 子代理内部的文本与工具事件不逐条进入主聊天；事件与只读查询保存关系、状态和摘要，可通过命令查看，不为订阅而恢复子线程。父回合结束等待子代理停止，恢复时重新核对状态；不提供子代理内部逐 token 输出。审批保留实际请求者身份。
 - 图片输出支持可读的本地路径及直接 base64 结果。只有 `fileId` 的输出没有受支持的下载接口，会显示限制；图片完整交互仍待真实验收。工具增量保存到投影，使用 `/codex progress` 查询。
 - 文件卡片展示 Codex 报告的补丁片段，不代表完整文件快照。没有在工具开始事件中提供的内容仍可在原始结果里查看。
@@ -174,6 +177,18 @@ pnpm pack
 
 `test:local:permissions` 使用本机 Codex、独立临时配置和 loopback 模拟模型，验证运行中提升／收紧权限与取消待审批请求，不使用用户凭据或付费模型服务。切换权限会中断当时的命令；已产生的外部效果不会回滚，接续指令要求先核对不确定结果。停止超时或新权限被拒绝时，插件结束原生进程并报告错误。已有 DSH 进程需重新加载本插件才能使用更新后的 Host 代码。
 
-设计说明见 [docs/design.md](docs/design.md)，权限行为与验证见 [docs/permissions-verification.md](docs/permissions-verification.md)，生命周期验证与界面调整见 [docs/workspace-verification.md](docs/workspace-verification.md)。
+目标桥接集成验证需先构建并打包，然后设置 `DSH_CLI` 指向已安装的 DSH `lib/bin.js`。例如在 PowerShell 中：
+
+```powershell
+pnpm build
+npm pack --ignore-scripts --pack-destination ../.refs/verification
+$env:DSH_CLI = 'C:/path/to/@deepseek-ai/dsh/lib/bin.js'
+pnpm test:local:host-goal
+# 也可显式指定候选包：node scripts/verify-host-goal.mjs C:/path/to/package.tgz
+```
+
+脚本在临时 DSH Web profile 安装候选包，使用真实宿主 Goal 服务和本机 Codex，验证两轮自动执行、既有目标栏投影完成、暂停与清除、原生受阻及执行失败。模型由 loopback 服务模拟，不使用用户凭据或付费模型；此验证不包含浏览器点击验收。默认候选包路径为 `../.refs/verification/dsh-plugin-codex-app-server-0.2.1.tgz`，不代表已发布 npm 包包含未发布修改。
+
+设计说明见 [docs/design.md](docs/design.md)，目标桥接见 [docs/host-goal-design.md](docs/host-goal-design.md)，权限行为与验证见 [docs/permissions-verification.md](docs/permissions-verification.md)，生命周期验证与界面调整见 [docs/workspace-verification.md](docs/workspace-verification.md)。
 
 变更记录见 [CHANGELOG.md](CHANGELOG.md)。

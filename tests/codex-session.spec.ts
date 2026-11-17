@@ -10,6 +10,9 @@ import { initialNativeState } from '../src/native-state.ts'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionRegistry } from '../src/session-registry.ts'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { GoalId } from '@deepseek-ai/dsh-goal'
+import type { HostGoal, HostGoalPort } from '../src/host-goal.ts'
 
 const user = (id = 'u1', content: object[] = [{ type: 'text', text: 'hello' }]): RequestMessage =>
   ({ id, role: 'user', content, source: { kind: 'user' } }) as unknown as RequestMessage
@@ -49,6 +52,7 @@ class FakeServer implements AppServer {
     if (method === 'thread/goal/clear') { this.goalState = null; return { cleared: true } }
     if (method === 'thread/goal/set') {
       this.goalState = { threadId: 'thread', objective: 'goal', status: 'paused', tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0, createdAt: 1, ...this.goalState, ...params, updatedAt: Number(this.goalState?.updatedAt ?? 0) + 1 }
+      this.emit('thread/goal/updated', { goal: this.goalState })
       return { goal: this.goalState }
     }
     if (method === 'thread/start' || method === 'thread/resume' || method === 'thread/fork') return { thread: { id: method === 'thread/fork' ? 'fork' : 'thread' }, model: 'configured-model', reasoningEffort: 'medium', serviceTier: params.serviceTier === 'fast' ? 'priority' : params.serviceTier ?? null }
@@ -89,6 +93,78 @@ function setup(overrides: Partial<CodexSessionDeps> = {}): { session: CodexSessi
   return { session, server: () => server, deps }
 }
 async function started(server: () => FakeServer): Promise<void> { await vi.waitFor(() => expect(server().counter).toBeGreaterThan(0)) }
+
+function hostGoalFixture() {
+  let current: HostGoal | undefined = { id: 'host-goal', revision: 1, objective: 'Finish the migration', phase: 'active', activation: 'armed', roundsStarted: 1 }
+  const port: HostGoalPort = {
+    current: () => current,
+    settle: (ref, phase) => { if (current?.id === ref.id && current.revision === ref.revision) current = { ...current, revision: current.revision + 1, phase, activation: 'disarmed' } },
+  }
+  return { port, current: () => current, change: (patch: Partial<HostGoal>) => { if (current) current = { ...current, ...patch } }, clear: () => { current = undefined },
+    request: () => {
+      const goal = current!
+      const message = createUserMessage({ content: [{ type: 'text', text: 'Continue the admitted host goal round.' }], source: { kind: 'goal', goalId: GoalId(goal.id), revision: goal.revision, round: goal.roundsStarted } })
+      return options([{ ...message, role: 'user' }], { currentTurnMessageIds: new Set([message.id]) })
+    },
+  }
+}
+
+describe('Codex sessions managed by DSH goal mode', () => {
+  it('forwards admitted host rounds and reports completion before releasing the DSH turn', async () => {
+    const host = hostGoalFixture(), f = setup({ hostGoal: host.port })
+    const first = collect(f.session.stream(host.request())); await started(f.server)
+    expect(f.server().goalState?.status).toBe('active')
+    f.server().goalState!.tokensUsed = 130
+    f.server().end(); await first
+    expect(f.server().goalState?.status).toBe('paused')
+    expect(host.current()?.phase).toBe('active')
+    host.change({ roundsStarted: 2 })
+    const second = collect(f.session.stream(host.request()))
+    await vi.waitFor(() => expect(f.server().counter).toBe(2))
+    expect(f.server().goalState?.tokensUsed).toBe(130)
+    f.server().goalState!.status = 'complete'
+    f.server().end(); await second
+    expect(host.current()?.phase).toBe('complete')
+    expect(f.server().calls.filter(call => call.method === 'thread/goal/set' && call.params.objective)).toHaveLength(1)
+  })
+  it.each(['pause', 'clear', 'edit'])('applies a host %s during native execution after interrupting the old round', async action => {
+    const host = hostGoalFixture(), f = setup({ hostGoal: host.port })
+    const stream = collect(f.session.stream(host.request())); await started(f.server)
+    f.server().onInterrupt = async () => { f.server().end('interrupted'); return {} }
+    if (action === 'clear') host.clear()
+    else if (action === 'pause') host.change({ revision: 2, phase: 'paused', activation: 'disarmed' })
+    else host.change({ revision: 2, objective: 'Edited migration' })
+    await f.session.refreshHostGoal(); await stream
+    expect(f.server().calls.some(call => call.method === 'turn/interrupt')).toBe(true)
+    if (action === 'clear') {
+      expect(f.session.state.hostGoal).toBeNull(); expect(f.server().goalState).toBeNull()
+    } else {
+      expect(f.server().goalState?.status).toBe('paused')
+      expect(f.session.state.hostGoal?.revision).toBe(2)
+      if (action === 'edit') expect(f.server().goalState?.objective).toBe('Edited migration')
+    }
+    expect(f.server().counter).toBe(1)
+    expect(f.server().closed).toBe(false)
+  })
+  it('keeps legacy goal mutations from competing with the existing host goal bar', async () => {
+    const host = hostGoalFixture(), f = setup({ hostGoal: host.port })
+    await expect(f.session.goal('set', options([]), 'Conflicting goal')).rejects.toThrow('DSH')
+    expect(f.session.state.hostGoal).toBeNull()
+  })
+  it('blocks the host and pauses its native goal when turn submission is rejected', async () => {
+    const host = hostGoalFixture(), f = setup({ hostGoal: host.port })
+    const first = collect(f.session.stream(host.request())); await started(f.server)
+    f.server().end(); await first
+    host.change({ roundsStarted: 2 })
+    f.server().onStart = async () => { throw new RpcError(-32600, 'model unavailable') }
+    const request = host.request()
+    await expect(collect(f.session.stream(request))).rejects.toThrow('model unavailable')
+    expect(host.current()?.phase).toBe('blocked')
+    expect(f.server().goalState?.status).toBe('paused')
+    expect(f.session.sentMessageIds.has(request.messages[0]!.id!)).toBe(false)
+    expect(f.server().closed).toBe(false)
+  })
+})
 
 describe('native Codex conversation', () => {
   it.each([undefined, true, false])('applies the Fast default (%s) to thread creation and each turn', async fastMode => {

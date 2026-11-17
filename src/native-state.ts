@@ -44,6 +44,7 @@ export const nativeStateSchema = z.object({
   plan: z.object({ turnId: z.string().optional(), explanation: z.string().optional(), steps: z.array(z.object({ step: z.string(), status: z.enum(['pending', 'inProgress', 'completed']) })), text: z.string(), final: z.boolean() }).default({ steps: [], text: '', final: false }),
   name: z.object({ title: z.string().optional(), nativeTitle: z.string().optional(), pinned: z.boolean(), error: z.string().optional() }).default({ pinned: false }),
   goal: goalSchema.nullable().default(null),
+  hostGoal: z.object({ id: z.string(), revision: count.positive(), objective: z.string(), nativeCreatedAt: count }).nullable().default(null),
   goalControl: z.object({ capability: z.enum(['unknown', 'supported', 'unavailable']), continuation: z.literal('bounded'), error: z.string().optional() }).default({ capability: 'unknown', continuation: 'bounded' }),
   agents: z.record(z.string(), nativeAgentSchema).default({}),
   tools: z.record(z.string(), progressSchema).default({}),
@@ -74,7 +75,7 @@ export function publishNativeState(session: Session, state: NativeState): void {
   appendPluginRecord(session, STATE_RECORD, nativeStateSchema.parse(state))
 }
 export const nativeStateProjection = {
-  key: 'tavloCodex', stateVersion: 9, stateSchema: nativeStateSchema,
+  key: 'tavloCodex', stateVersion: 10, stateSchema: nativeStateSchema,
   init: initialNativeState, apply: foldNativeState,
   wire: { viewSchema: nativeViewSchema, view: (state: NativeState): NativeView => state, summary: false },
 } satisfies ProjectionDefinition<'tavloCodex', NativeState>

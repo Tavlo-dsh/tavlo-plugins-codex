@@ -6,6 +6,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionTitleProviderId, normalizeSessionTitle } from '@deepseek-ai/dsh-session-title'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-goal'
 import type {} from '@deepseek-ai/dsh-llm'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { ProjectionHandle } from '@deepseek-ai/dsh-session-projection'
@@ -132,6 +133,11 @@ export default class TavloCodex extends Service {
       })
     })
     ctx.on('agent/disposed', ({ agent }) => this.registry.disposeSession(agent.id))
+    const refreshGoal = (sessionId: string): void => {
+      void this.registry.peek(sessionId)?.refreshHostGoal().catch(error => ctx.logger.warn(`Codex goal synchronization failed: ${String(error)}`))
+    }
+    ctx.on('goal/changed', ({ agent }) => refreshGoal(agent.id))
+    ctx.on('goal/activation-changed', ({ sessionId }) => refreshGoal(sessionId))
     ctx.effect(() => () => {
       this.discoveryStopped = true
       void this.discoveryClient?.close()
@@ -202,6 +208,8 @@ export default class TavloCodex extends Service {
     return { sandbox: policy.mode, approval: approval?.overrideOf(session) ?? approval?.config.policy ?? 'ask', writableRoots: policy.additionalWritableRoots }
   }
   private createSession(agent: Agent, id: string, cwd: string, start: SessionStart): CodexSession {
+    const ctxGoal = () => this.ctx.agents.get(agent.id) === agent && agent.model.current()?.provider === PROVIDER
+      ? this.ctx.get('goals')?.get(agent) : undefined
     const state = structuredClone(this.nativeStateHandle?.stateOf(agent.session) ?? initialNativeState())
     const hostTitle = this.ctx.get('sessionTitle')?.get(agent.session)
     if (hostTitle) state.name = { ...state.name, title: hostTitle.title, pinned: hostTitle.source.kind === 'user' }
@@ -211,6 +219,16 @@ export default class TavloCodex extends Service {
       sentMessageIds: start.sentMessageIds, inheritedReplay: start.inheritedReplay, after: start.after,
       cancelGraceMs: this.config.cancelGraceMs,
       nativeState: state,
+      hostGoal: {
+        current: () => ctxGoal(),
+        settle: (ref, phase, reason) => {
+          const service = this.ctx.get('goals'), current = ctxGoal()
+          if (!service || !current || current.id !== ref.id || current.revision !== ref.revision || current.phase !== 'active') return
+          if (phase === 'complete') service.complete(agent, current)
+          else if (phase === 'paused') service.pause(agent, current)
+          else service.block(agent, current, reason ?? { code: 'codex-blocked', message: 'Codex 目标受阻。' })
+        },
+      },
       publishNativeState: state => publishNativeState(agent.session, state),
       onNativeName: title => {
         const current = this.ctx.get('sessionTitle')?.get(agent.session)
