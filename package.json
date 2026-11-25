@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-codex-app-server",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "在 DeepSeek Harness 里通过 Codex App Server 运行本机 Codex（完整 Codex harness）",
   "license": "MIT",
   "author": "Tavlo-dsh",

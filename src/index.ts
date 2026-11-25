@@ -210,7 +210,9 @@ export default class TavloCodex extends Service {
   private createSession(agent: Agent, id: string, cwd: string, start: SessionStart): CodexSession {
     const ctxGoal = () => this.ctx.agents.get(agent.id) === agent && agent.model.current()?.provider === PROVIDER
       ? this.ctx.get('goals')?.get(agent) : undefined
-    const state = structuredClone(this.nativeStateHandle?.stateOf(agent.session) ?? initialNativeState())
+    const projection = this.nativeStateHandle
+    if (!projection) throw new Error('Codex 会话状态尚未就绪。')
+    const state = structuredClone(projection.stateOf(agent.session))
     const hostTitle = this.ctx.get('sessionTitle')?.get(agent.session)
     if (hostTitle) state.name = { ...state.name, title: hostTitle.title, pinned: hostTitle.source.kind === 'user' }
     return new CodexSession({
@@ -229,7 +231,7 @@ export default class TavloCodex extends Service {
           else service.block(agent, current, reason ?? { code: 'codex-blocked', message: 'Codex 目标受阻。' })
         },
       },
-      publishNativeState: state => publishNativeState(agent.session, state),
+      publishNativeState: state => publishNativeState(agent.session, state, projection.stateOf(agent.session)),
       onNativeName: title => {
         const current = this.ctx.get('sessionTitle')?.get(agent.session)
         if (current?.source.kind === 'user' || current?.title === title) return

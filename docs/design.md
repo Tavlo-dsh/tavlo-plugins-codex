@@ -82,7 +82,7 @@ sequenceDiagram
 
 使用 `thread/tokenUsage/updated.total` 的累计水位差分统计消耗，独立保存 `last` 作为最近模型调用快照。缓存读写 token 从 input token 中拆开，reasoning 为 output 子集，不再次计入总量。容量来自原生 `modelContextWindow`，未知时不生成虚构百分比。
 
-DSH 同一步覆盖标准 usage，并将同一份 usage 同时用于消耗与上下文估算，无法准确承载原生多次调用。因此停止发送标准 usage，使用 `tavloCodex.usage` 和 `/codex usage` 发布权威统计。水位、最近快照和统计边界通过 `plugin:tavlo-codex/state` 持久化；正常恢复沿用已知基线，未知恢复／分叉首通知从 total 减 last 推导历史水位并标记 inferred，此前未观测调用可能少计。重复通知不增加消耗，晚到事件不串回合，累计回退重新建基线。
+DSH 同一步覆盖标准 usage，并将同一份 usage 同时用于消耗与上下文估算，无法准确承载原生多次调用。因此停止发送标准 usage，使用 `tavloCodex.usage` 和 `/codex usage` 发布权威统计。原生状态通过 `plugin:tavlo-codex/state-patch` 持久化：元数据、回合 diff 和各个工具条目分别比较，只写变化部分；回放仍接受旧的 `plugin:tavlo-codex/state` 全量快照。客户端只接收统计、速度设置及目标标识与状态，`/codex progress` 继续使用服务端完整的工具详情。正常恢复沿用已知基线，未知恢复／分叉首通知从 total 减 last 推导历史水位并标记 inferred，此前未观测调用可能少计。重复通知不增加消耗，晚到事件不串回合，累计回退重新建基线。
 
 自动压缩与手动 `/codex compact` 都由 Codex 执行。压缩状态来自 `contextCompaction`，完成后清除旧占用快照、等待新样本；切换模型清旧快照与容量。
 

@@ -1,5 +1,6 @@
 /** Durable native-loop facts. Kept outside DSH's single-call usage/pressure slot. */
 import { z } from 'zod'
+import { isDeepStrictEqual } from 'node:util'
 import { appendPluginRecord, pluginRecordOf } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
@@ -54,35 +55,72 @@ export const nativeStateSchema = z.object({
   diagnostics: z.array(z.object({ id: z.string(), kind: z.string(), severity: z.enum(['info', 'warning', 'error']), message: z.string(), details: z.string().optional() })).max(100).default([]),
 })
 export type NativeState = z.infer<typeof nativeStateSchema>
-export const nativeViewSchema = nativeStateSchema.extend({ fastModeDefault: z.boolean().optional() })
+export const nativeViewSchema = nativeStateSchema.pick({ threadId: true, turnId: true, usage: true, speed: true, compaction: true, goal: true, hostGoal: true }).extend({ fastModeDefault: z.boolean().optional() })
 export type NativeView = z.infer<typeof nativeViewSchema>
 export const initialNativeState = (): NativeState => nativeStateSchema.parse({ version: 1, usage: { consumed: zeroUsage(), turnConsumed: zeroUsage() }, compaction: { status: 'idle' } })
 export const STATE_RECORD = 'plugin:tavlo-codex/state' as const
+const PATCH_RECORD = 'plugin:tavlo-codex/state-patch' as const
+const patchSchema = z.object({
+  meta: nativeStateSchema.omit({ tools: true, diff: true }).optional(),
+  tools: z.record(z.string(), progressSchema.nullable()).optional(),
+  diff: nativeStateSchema.shape.diff.nullable(),
+})
+type StatePatch = z.infer<typeof patchSchema>
 
 declare module '@deepseek-ai/dsh-session/types' {
-  interface PluginRecordMap { 'plugin:tavlo-codex/state': NativeState }
+  interface PluginRecordMap { [STATE_RECORD]: NativeState; [PATCH_RECORD]: StatePatch }
 }
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap { tavloCodex: NativeView }
 }
 export function foldNativeState(state: NativeState, event: SessionEvent): NativeState {
   const entry = pluginRecordOf(event)
+  if (entry?.type === PATCH_RECORD) {
+    const parsed = patchSchema.safeParse(entry.data)
+    if (!parsed.success) return state
+    const patch = parsed.data
+    let tools = state.tools
+    if (patch.tools) {
+      tools = { ...tools }
+      for (const [key, value] of Object.entries(patch.tools)) {
+        if (value === null) delete tools[key]
+        else tools[key] = value
+      }
+    }
+    const next: NativeState = { ...(patch.meta ?? state), tools }
+    const diff = patch.diff === undefined ? state.diff : patch.diff
+    if (diff) next.diff = diff
+    else delete next.diff
+    return next
+  }
   if (entry?.type !== STATE_RECORD) return state
   const parsed = nativeStateSchema.safeParse(entry.data)
   return parsed.success ? parsed.data : state
 }
-export function publishNativeState(session: Session, state: NativeState): void {
-  appendPluginRecord(session, STATE_RECORD, nativeStateSchema.parse(state))
+export function publishNativeState(session: Session, state: NativeState, previous: NativeState): void {
+  const { tools, diff, ...meta } = state
+  const { tools: previousTools, diff: previousDiff, ...previousMeta } = previous
+  const patch: StatePatch = {}
+  if (!isDeepStrictEqual(meta, previousMeta)) patch.meta = meta
+  if (!isDeepStrictEqual(diff, previousDiff)) patch.diff = diff ?? null
+  const toolChanges = Object.fromEntries([...new Set([...Object.keys(previousTools), ...Object.keys(tools)])]
+    .filter(key => !isDeepStrictEqual(previousTools[key], tools[key]))
+    .map(key => [key, tools[key] ?? null]))
+  if (Object.keys(toolChanges).length) patch.tools = toolChanges
+  if (Object.keys(patch).length) appendPluginRecord(session, PATCH_RECORD, patchSchema.parse(patch))
+}
+function nativeView({ threadId, turnId, usage, speed, compaction, goal, hostGoal }: NativeState): NativeView {
+  return { threadId, turnId, usage, speed, compaction, goal, hostGoal }
 }
 export const nativeStateProjection = {
-  key: 'tavloCodex', stateVersion: 10, stateSchema: nativeStateSchema,
+  key: 'tavloCodex', stateVersion: 11, stateSchema: nativeStateSchema,
   init: initialNativeState, apply: foldNativeState,
-  wire: { viewSchema: nativeViewSchema, view: (state: NativeState): NativeView => state, summary: false },
+  wire: { viewSchema: nativeViewSchema, view: nativeView, summary: false },
 } satisfies ProjectionDefinition<'tavloCodex', NativeState>
 
 /** Expose the current plugin default without storing deployment config in session history. */
 export function nativeStateProjectionWithDefaults(fastMode?: boolean): typeof nativeStateProjection {
   return { ...nativeStateProjection, wire: { ...nativeStateProjection.wire,
-    view: state => ({ ...state, ...(fastMode === undefined ? {} : { fastModeDefault: fastMode }) }),
+    view: state => ({ ...nativeView(state), ...(fastMode === undefined ? {} : { fastModeDefault: fastMode }) }),
   } }
 }
